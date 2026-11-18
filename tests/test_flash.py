@@ -17,6 +17,17 @@ from canstudio.uds import UdsClient
 
 BASE = 0x08000000
 
+# 本机的 bincopy 装在 .pylibs 下，import 之前先把目录挂进 sys.path
+from canstudio.link import ensure_dependencies
+
+ensure_dependencies()
+
+try:
+    import bincopy  # noqa: F401
+    HAVE_BINCOPY = True
+except ImportError:
+    HAVE_BINCOPY = False
+
 
 class FlashEcu:
     """能跑完整刷写状态机的假 ECU。"""
@@ -98,6 +109,7 @@ class ImageTests(unittest.TestCase):
         with self.assertRaises(CanStudioError):
             FirmwareImage([])
 
+    @unittest.skipUnless(HAVE_BINCOPY, "bincopy not installed")
     def test_load_intel_hex(self):
         # 两段：0x08000000 起 4 字节，0x08000010 起 2 字节
         with tempfile.NamedTemporaryFile("w", suffix=".hex", delete=False) as f:
