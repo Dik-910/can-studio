@@ -1,0 +1,10 @@
+# 编译与测试产物
+__pycache__/
+*.pyc
+/tests/__pycache__/
+/canstudio/__pycache__/
+
+# 运行期临时文件
+*.log
+*.nvm
+/.reconnect_check.*

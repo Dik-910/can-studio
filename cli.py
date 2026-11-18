@@ -1,0 +1,295 @@
+#!/usr/bin/python3
+"""命令行入口。界面还没接上，先用它验证工具真在跟 ECU 说话。
+
+    ./cli.py did read VIN 0x0101 0x0302
+    ./cli.py did write 0x0201 3C
+    ./cli.py dtc list
+    ./cli.py dtc clear
+    ./cli.py raw 22 F1 90
+    ./cli.py monitor
+
+所有子命令共用 --if / --tx / --rx，默认对准 can-node 的 ecu-server
+（vcan0、0x7E0 / 0x7E8）。
+"""
+import argparse
+import atexit
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from canstudio import dtc as dtc_mod
+from canstudio import dids
+from canstudio.dids import describe, find
+from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
+from canstudio.link import RecordingLink, SocketCanLink
+from canstudio.uds import SESSION_EXTENDED, UdsClient
+
+
+def open_client(args, recording=False):
+    link = SocketCanLink(channel=args.iface, txid=args.tx, rxid=args.rx)
+    # 不管是正常结束还是抛异常，都要关总线，否则 python-can 退出时报警告
+    atexit.register(link.close)
+    if recording:
+        link = RecordingLink(link)
+    return UdsClient(link, p2_ms=args.p2, key_algo=_key_algo(args)), link
+
+
+def _key_algo(args):
+    """默认按 can-node 的算法；--key-file 可以换成别的 ECU 的算法。"""
+    if not args.key_file:
+        return None
+
+    namespace = {}
+    with open(args.key_file, encoding="utf-8") as f:
+        exec(compile(f.read(), args.key_file, "exec"), namespace)
+
+    for name in ("key_algo", "calculate_key", "key"):
+        if callable(namespace.get(name)):
+            return namespace[name]
+    raise SystemExit(f"{args.key_file} 里没有 key_algo 函数")
+
+
+def require_session(client, session_type, args):
+    if args.no_session:
+        return
+    client.change_session(session_type)
+    if session_type == SESSION_EXTENDED and not args.no_unlock:
+        try:
+            client.unlock(1)
+        except NegativeResponse as exc:
+            print(f"[warn] 安全访问失败：{exc}", file=sys.stderr)
+
+
+def cmd_session(args):
+    client, _ = open_client(args)
+    print(client.change_session(args.type))
+    return 0
+
+
+def cmd_reset(args):
+    client, _ = open_client(args)
+    print(client.ecu_reset(args.type))
+    return 0
+
+
+def cmd_did_read(args):
+    client, _ = open_client(args)
+    if args.unlock:
+        require_session(client, SESSION_EXTENDED, args)
+
+    failed = 0
+    for name in args.dids:
+        spec = find(name)
+        if spec is None:
+            print(f"{name}: 无法识别的 DID", file=sys.stderr)
+            failed += 1
+            continue
+        try:
+            raw = client.read_did(spec.did)
+        except (NegativeResponse, TransportTimeout) as exc:
+            print(f"0x{spec.did:04X} {spec.name}: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        label, value = describe(spec.did, raw)
+        print(f"0x{spec.did:04X}  {label:<12} {value}")
+    return 0 if failed == 0 else 1
+
+
+def cmd_did_write(args):
+    client, _ = open_client(args)
+    spec = find(args.did)
+    if spec is None:
+        print(f"无法识别的 DID: {args.did}", file=sys.stderr)
+        return 1
+
+    data = bytes.fromhex(args.value.replace(" ", ""))
+    if spec.length is not None and len(data) != spec.length:
+        print(f"警告：{spec.name} 期望 {spec.length} 字节，给了 {len(data)} 字节",
+              file=sys.stderr)
+
+    client.change_session(SESSION_EXTENDED)
+    if not args.no_unlock:
+        client.unlock(1)
+    client.write_did(spec.did, data)
+    print(f"0x{spec.did:04X} {spec.name} 写入成功（{len(data)} 字节）")
+    return 0
+
+
+def cmd_dtc_list(args):
+    client, _ = open_client(args)
+    payload = client.read_dtc(0x02, mask=args.mask)
+    entries = dtc_mod.parse_report_by_mask(payload)
+
+    if args.json:
+        import json
+        print(json.dumps([
+            {"code": e.text, "raw": f"0x{e.code:06X}", "status": f"0x{e.status:02X}",
+             "bits": [n for n, _ in dtc_mod.decode_status(e.status)]}
+            for e in entries], ensure_ascii=False, indent=2))
+        return 0
+
+    if not entries:
+        print("无故障")
+        return 0
+
+    print(f"{'DTC':<8} {'状态':<6} 明细")
+    for e in entries:
+        print(f"{e.text:<8} 0x{e.status:02X}   {dtc_mod.describe_status(e.status)}")
+    return 0
+
+
+def cmd_dtc_supported(args):
+    client, _ = open_client(args)
+    payload = client.read_dtc(0x0A)
+    entries = dtc_mod.parse_report_by_mask(payload)
+    for e in entries:
+        print(f"{e.text:<8} 0x{e.code:06X}")
+    return 0
+
+
+def cmd_dtc_clear(args):
+    client, _ = open_client(args)
+    client.change_session(SESSION_EXTENDED)
+    client.clear_dtc(args.group)
+    print(f"已清除 group 0x{args.group:06X}")
+    return 0
+
+
+def cmd_dtc_snapshot(args):
+    client, _ = open_client(args)
+    record = args.record
+
+    payload = client.read_dtc(0x03)
+    pairs = dtc_mod.parse_snapshot_identification(payload)
+    if not pairs:
+        print("没有任何 DTC 存了快照")
+        return 0
+
+    print("快照标识：", ", ".join(f"{dtc_mod.format_dtc(c)}@记录{r}" for c, r in pairs))
+
+    payload = client.read_dtc(0x05, record=record)
+    rec, entries = dtc_mod.parse_stored_data(payload, dids.did_lengths())
+    for e in entries:
+        print(f"\n{dtc_mod.format_dtc(e.code)} 状态 0x{e.status:02X} 记录 {rec}")
+        for did, data in e.snapshot:
+            label, value = describe(did, data)
+            print(f"  0x{did:04X} {label:<12} {value}")
+    return 0
+
+
+def cmd_raw(args):
+    client, link = open_client(args, recording=True)
+    request = bytes.fromhex(" ".join(args.bytes).replace(" ", ""))
+    client.link.send(request)
+    resp = client.link.recv(args.p2 / 1000.0)
+    if resp is None:
+        print("无响应", file=sys.stderr)
+        return 1
+    print(" ".join(f"{b:02X}" for b in resp))
+    return 0
+
+
+def cmd_monitor(args):
+    client, link = open_client(args, recording=True)
+    print(f"监视 {args.iface}（Ctrl-C 退出）")
+    last_ping = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now - last_ping > 2.0:
+                client.tester_present()
+                last_ping = now
+            data = link.recv(0.1)
+            if data:
+                print(f"{time.strftime('%H:%M:%S')}  rx  {data.hex(' ').upper()}")
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-i", "--iface", default="vcan0", help="CAN 接口（默认 vcan0）")
+    common.add_argument("--tx", type=lambda s: int(s, 0), default=0x7E0, help="请求 ID")
+    common.add_argument("--rx", type=lambda s: int(s, 0), default=0x7E8, help="响应 ID")
+    common.add_argument("--p2", type=int, default=50, help="P2 窗口（毫秒）")
+    common.add_argument("--key-file", help="提供 key_algo 的 python 文件，换 ECU 用")
+    common.add_argument("--no-session", action="store_true", help="不自动切会话")
+
+    parser = argparse.ArgumentParser(prog="can-studio", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("session", parents=[common], help="切换会话")
+    p.add_argument("type", type=lambda s: int(s, 0), nargs="?", default=3)
+    p.set_defaults(func=cmd_session)
+
+    p = sub.add_parser("reset", parents=[common], help="ECU 复位")
+    p.add_argument("type", type=lambda s: int(s, 0), nargs="?", default=1)
+    p.set_defaults(func=cmd_reset)
+
+    p = sub.add_parser("did", parents=[common], help="DID 读写")
+    did_sub = p.add_subparsers(dest="did_command", required=True)
+
+    q = did_sub.add_parser("read", parents=[common], help="读一个或多个 DID")
+    q.add_argument("dids", nargs="+", help="DID 数值或名字，如 0xF190 / VIN")
+    q.add_argument("--unlock", action="store_true", help="读之前先切扩展会话并解锁")
+    q.set_defaults(func=cmd_did_read)
+
+    q = did_sub.add_parser("write", parents=[common], help="写 DID")
+    q.add_argument("did")
+    q.add_argument("value", help="十六进制字节，如 3C")
+    q.add_argument("--no-unlock", action="store_true")
+    q.set_defaults(func=cmd_did_write)
+
+    p = sub.add_parser("dtc", parents=[common], help="故障码")
+    dtc_sub = p.add_subparsers(dest="dtc_command", required=True)
+
+    q = dtc_sub.add_parser("list", parents=[common], help="按状态掩码读码")
+    q.add_argument("--mask", type=lambda s: int(s, 0), default=0xFF)
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_dtc_list)
+
+    q = dtc_sub.add_parser("supported", parents=[common], help="列出支持的码")
+    q.set_defaults(func=cmd_dtc_supported)
+
+    q = dtc_sub.add_parser("clear", parents=[common], help="清码（需扩展会话）")
+    q.add_argument("--group", type=lambda s: int(s, 0), default=0xFFFFFF)
+    q.set_defaults(func=cmd_dtc_clear)
+
+    q = dtc_sub.add_parser("snapshot", parents=[common], help="读快照")
+    q.add_argument("--record", type=lambda s: int(s, 0), default=1)
+    q.set_defaults(func=cmd_dtc_snapshot)
+
+    p = sub.add_parser("raw", parents=[common], help="发一帧原始 UDS 请求")
+    p.add_argument("bytes", nargs="+")
+    p.set_defaults(func=cmd_raw)
+
+    p = sub.add_parser("monitor", parents=[common], help="被动监视并保持会话")
+    p.set_defaults(func=cmd_monitor)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.no_unlock = getattr(args, "no_unlock", False)
+
+    try:
+        return args.func(args)
+    except NegativeResponse as exc:
+        print(f"否定响应：{exc}", file=sys.stderr)
+        return 2
+    except TransportTimeout as exc:
+        print(f"超时：{exc}", file=sys.stderr)
+        return 3
+    except CanStudioError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main())
