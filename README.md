@@ -3,13 +3,14 @@
 CAN / UDS 诊断上位机。面向 [can-node](https://github.com/Dik-910/can-node) 的
 诊断服务与 Bootloader，也适用于任何遵守 ISO 14229 的 ECU。
 
-分为三层，界面只依赖最上面那层：
+分为四层，界面只依赖下面三层：
 
 ```
-link.py    链路：把「发一帧、等一帧」抽象出来（SocketCAN / 假链路）
-uds.py     协议：ISO 14229 请求编码、响应解码、否定响应与 0x78 处理
-dtc.py     语义：故障码、状态位、快照的解读
-gui/       Qt 界面（待接入），不碰协议细节
+canstudio/link.py    链路：把「发一帧、等一帧」抽象出来（SocketCAN / 假链路）
+canstudio/uds.py     协议：ISO 14229 请求编码、响应解码、否定响应与 0x78 处理
+canstudio/dtc.py     语义：故障码、状态位、快照的解读
+canstudio/flash.py   流程：0x34/36/37 编排、重试、进度、CRC 交叉校验
+gui/                 界面：五页 Qt 窗口，只调用上面三层，不含协议编码
 ```
 
 这样分层的原因：协议层要能脱离硬件测试。`tests/` 里用假链路把整套服务跑一遍，
@@ -26,9 +27,24 @@ gui/       Qt 界面（待接入），不碰协议细节
 | `canstudio/dids.py` | 已实现：DID 表与解码，未知 DID 按原始字节展示 |
 | `canstudio/flash.py` | 已实现：HEX/S-record 解析、分块、序号回绕、重试、CRC 交叉校验 |
 | `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
-| `gui/` | 未开始（PySide6） |
+| `gui/` | 已实现：连接、DID、故障码、刷写、报文监视五页（PySide6） |
 
-测试 69 项，全部不依赖 CAN 接口。
+测试 77 项，全部不依赖 CAN 接口与显示器。
+
+## 界面
+
+![主界面](docs/screenshot.png)
+
+左栏五个功能页，底部是操作日志，状态栏显示当前连接。所有耗时操作都走后台
+线程，界面不会因为一次 P2 超时而假死。
+
+```bash
+./studio.py          # 图形界面
+make shot            # 离屏重新渲染截图（无显示器也能出图）
+```
+
+界面测试用 `QT_QPA_PLATFORM=offscreen` 真跑事件循环：构造窗口、注入假 ECU、
+点按钮，断言表格被填写。这样界面代码不是「写完没跑过」。
 
 ## 用法
 
@@ -150,3 +166,17 @@ MIT
 本仓库的取舍：协议层自己实现（这样两侧实现独立，互操作测试才有意义），
 界面层用 PySide6（官方绑定，LGPL，与 MIT 兼容；PyQt5 是 GPL，不能与 MIT 混用），
 固件文件解析用 `bincopy`（Intel HEX 与 S-record 的格式细节不必自己维护）。
+
+## 依赖
+
+| 用途 | 包 | 说明 |
+|---|---|---|
+| 链路 | `python-can`, `can-isotp` | 只在 `SocketCanLink` 里按需 import |
+| 固件文件 | `bincopy` | Intel HEX / S-record 解析 |
+| 界面 | `PySide6-Essentials` | LGPL，与 MIT 兼容 |
+
+```bash
+pip install python-can can-isotp bincopy PySide6-Essentials
+```
+
+测试只依赖标准库：假链路代替 SocketCAN，离屏后端代替显示器。
