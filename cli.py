@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from canstudio import dtc as dtc_mod
 from canstudio import dids
+from canstudio.flash import FlashJob, load_firmware
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
 from canstudio.link import RecordingLink, SocketCanLink
@@ -179,6 +180,44 @@ def cmd_dtc_snapshot(args):
     return 0
 
 
+def cmd_flash(args):
+    image = load_firmware(args.file, base_address=args.base)
+    print(f"固件 {args.file}: 0x{image.start:08X}..0x{image.end:08X}  "
+          f"{image.size} 字节  crc32 0x{image.crc32:08X}")
+
+    if not args.yes:
+        answer = input("确认刷写？[y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("已取消")
+            return 1
+
+    client, _ = open_client(args)
+    job = FlashJob(client, block_retries=args.retries)
+
+    last = [0]
+
+    def progress(sent, total):
+        # 同一行刷新，避免刷出几百行
+        percent = sent * 100 // total
+        bar = "#" * (percent // 4)
+        print(f"\r  [{bar:<25}] {percent:3d}%  {sent}/{total}", end="", flush=True)
+        last[0] = sent
+
+    result = job.run(image, progress=progress)
+    print()
+    print(f"完成：{result.bytes_written} 字节 / {result.blocks} 块，"
+          f"{result.elapsed_s:.2f} s")
+    if result.crc_ecu is not None:
+        print(f"CRC 校验通过：0x{result.crc_ecu:08X}")
+    else:
+        print("CRC 校验：ECU 只回了状态，未提供 CRC 值")
+
+    if args.reset:
+        client.ecu_reset(1)
+        print("已发送复位")
+    return 0
+
+
 def cmd_raw(args):
     client, link = open_client(args, recording=True)
     request = bytes.fromhex(" ".join(args.bytes).replace(" ", ""))
@@ -262,6 +301,15 @@ def build_parser():
     q = dtc_sub.add_parser("snapshot", parents=[common], help="读快照")
     q.add_argument("--record", type=lambda s: int(s, 0), default=1)
     q.set_defaults(func=cmd_dtc_snapshot)
+
+    p = sub.add_parser("flash", parents=[common], help="刷写固件（hex / s19 / bin）")
+    p.add_argument("file")
+    p.add_argument("--base", type=lambda s: int(s, 0), default=0x08000000,
+                   help="裸 bin 的基地址")
+    p.add_argument("--retries", type=int, default=2, help="单块重试次数")
+    p.add_argument("--reset", action="store_true", help="刷完复位")
+    p.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+    p.set_defaults(func=cmd_flash)
 
     p = sub.add_parser("raw", parents=[common], help="发一帧原始 UDS 请求")
     p.add_argument("bytes", nargs="+")

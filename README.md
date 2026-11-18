@@ -24,10 +24,11 @@ gui/       Qt 界面（待接入），不碰协议细节
 | `canstudio/uds.py` | 已实现：`0x10/11/14/19/22/27/2E/31/34/36/37/3E` |
 | `canstudio/dtc.py` | 已实现：DTC 编解码、状态位、快照解析（0x19 六个子功能） |
 | `canstudio/dids.py` | 已实现：DID 表与解码，未知 DID 按原始字节展示 |
-| `cli.py` | 已实现：会话、DID 读写、故障码、原始请求、监视 |
+| `canstudio/flash.py` | 已实现：HEX/S-record 解析、分块、序号回绕、重试、CRC 交叉校验 |
+| `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
 | `gui/` | 未开始（PySide6） |
 
-测试 54 项，全部不依赖 CAN 接口。
+测试 69 项，全部不依赖 CAN 接口。
 
 ## 用法
 
@@ -37,6 +38,7 @@ gui/       Qt 界面（待接入），不碰协议细节
 ./cli.py dtc list
 ./cli.py dtc snapshot --record 1
 ./cli.py dtc clear
+./cli.py flash build/app.hex
 ./cli.py raw 22 F1 90
 ./cli.py monitor
 ```
@@ -73,6 +75,16 @@ $ ./cli.py did read 0x0201
 | `dtc list` | 无故障 |
 | `dtc supported` | `U010087 0xC10087` |
 | `raw 22 F1 90` | 原始响应 `62 F1 90 4C 53 56 41 ...` |
+| `flash fw.hex -y` | 2048 字节 / 9 块 / 0.05 s，ECU 侧算出的 CRC32 与本机一致 |
+
+刷写的输出：
+
+```
+固件 fw.hex: 0x08000000..0x08000800  2048 字节  crc32 0xB9D45861
+  [#########################] 100%  2048/2048
+完成：2048 字节 / 9 块，0.05 s
+CRC 校验通过：0xB9D45861
+```
 
 ## 协议细节
 
@@ -122,3 +134,19 @@ DID 表与密钥算法都按 can-node 的 `ecu-server` 定义（`canstudio/dids.
 ## 许可证
 
 MIT
+
+## 参考的同类项目
+
+协议与界面都不必从零设计，几个公开项目的做法有直接借鉴价值：
+
+| 项目 | 借鉴的点 |
+|---|---|
+| [UDT](https://github.com/hmf1235789/UDT) | 按 `core / transports / services / gui` 分包，服务用注册表扩展 |
+| [UDS_Python_Prj](https://github.com/teddy1122/UDS_Python_Prj) | 刷写上位机的完整流程：固件文件解析 → ISO-TP → UDS 传输服务 |
+| [uds_tracer](https://github.com/aslansq/uds_tracer) | 报文监视界面的信息组织（时间、方向、原始帧、解析结果） |
+| [python-can](https://github.com/hardbyte/python-can) | `can.viewer` 的后台收帧方式与界面骨架 |
+| [cantools](https://github.com/cantools/cantools) | DBC 解码，监视页按信号名展示而非裸字节 |
+
+本仓库的取舍：协议层自己实现（这样两侧实现独立，互操作测试才有意义），
+界面层用 PySide6（官方绑定，LGPL，与 MIT 兼容；PyQt5 是 GPL，不能与 MIT 混用），
+固件文件解析用 `bincopy`（Intel HEX 与 S-record 的格式细节不必自己维护）。
