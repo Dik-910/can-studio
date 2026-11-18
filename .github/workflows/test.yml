@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 协议层测试全部用假链路，不装 python-can / can-isotp 也能跑。
+      # 真依赖只在 SocketCanLink 里按需 import。
+      - name: unit tests
+        run: make check
