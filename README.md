@@ -10,7 +10,8 @@ canstudio/link.py    链路：把「发一帧、等一帧」抽象出来（Socke
 canstudio/uds.py     协议：ISO 14229 请求编码、响应解码、否定响应与 0x78 处理
 canstudio/dtc.py     语义：故障码、状态位、快照的解读
 canstudio/flash.py   流程：0x34/36/37 编排、重试、进度、CRC 交叉校验
-gui/                 界面：五页 Qt 窗口，只调用上面三层，不含协议编码
+canstudio/signals.py 语义：按 DBC 把 CAN 帧解成信号值
+gui/                 界面：五页 Qt 窗口，只调用上面四层，不含协议编码
 ```
 
 这样分层的原因：协议层要能脱离硬件测试。`tests/` 里用假链路把整套服务跑一遍，
@@ -26,10 +27,11 @@ gui/                 界面：五页 Qt 窗口，只调用上面三层，不含�
 | `canstudio/dtc.py` | 已实现：DTC 编解码、状态位、快照解析（0x19 六个子功能） |
 | `canstudio/dids.py` | 已实现：DID 表与解码，未知 DID 按原始字节展示 |
 | `canstudio/flash.py` | 已实现：HEX/S-record 解析、分块、序号回绕、重试、CRC 交叉校验 |
+| `canstudio/signals.py` | 已实现：DBC 载入与帧解码，未知报文不中断监视 |
 | `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
 | `gui/` | 已实现：连接、DID、故障码、刷写、报文监视五页（PySide6） |
 
-测试 77 项，全部不依赖 CAN 接口与显示器。
+测试 97 项，全部不依赖 CAN 接口与显示器。
 
 ## 界面
 
@@ -37,6 +39,15 @@ gui/                 界面：五页 Qt 窗口，只调用上面三层，不含�
 
 左栏五个功能页，底部是操作日志，状态栏显示当前连接。所有耗时操作都走后台
 线程，界面不会因为一次 P2 超时而假死。
+
+监视页是截图里那页：它是**原始帧监视**，不是 UDS 报文列表 —— 单独开一个
+SocketCAN 套接字，所以能看到总线上真实流动的周期帧（ISO-TP 那条链路会
+把帧消费掉）。载入 DBC 后，`0x200` 直接显示为
+`PackVoltage=51.12 V  PackCurrent=-1 A  Soc=87 %`，而不是十六进制字节。
+
+```bash
+./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc
+```
 
 ```bash
 ./studio.py          # 图形界面
@@ -92,6 +103,19 @@ $ ./cli.py did read 0x0201
 | `dtc supported` | `U010087 0xC10087` |
 | `raw 22 F1 90` | 原始响应 `62 F1 90 4C 53 56 41 ...` |
 | `flash fw.hex -y` | 2048 字节 / 9 块 / 0.05 s，ECU 侧算出的 CRC32 与本机一致 |
+| `monitor --dbc can_matrix.dbc` | `0x200` 解为 `PackVoltage=51.12 V  PackCurrent=-1 A  Soc=87 %  TempMax=25 degC` |
+
+监视页拿到真实帧时的输出（DBC 用 can-node 的 `docs/can_matrix.dbc`）：
+
+```
+DBC .../can_matrix.dbc：5 条报文
+0x180  NodeStatus   NodeState=2  ErrLevel=1  BusOffCnt=4660  UptimeS=412 s
+0x200  PackData     PackVoltage=51.12 V  PackCurrent=-1 A  Soc=87 %  TempMax=25 degC
+0x181  BusStatus    Tec=0  Rec=0  BusLoadPermille=153 permille
+```
+
+三种编码都被覆盖到：无符号（`BusOffCnt=0x1234`）、有符号（`PackCurrent=-1 A`）、
+带偏移（`TempMax` 原始 65 减去 40）。
 
 刷写的输出：
 

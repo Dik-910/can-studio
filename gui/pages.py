@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 from canstudio import dids
 from canstudio import dtc as dtc_mod
 from canstudio.flash import Cancelled, FlashJob, load_firmware
+from canstudio.link import FrameMonitor
+from canstudio.signals import SignalDatabase
 
 
 def describe_link(link):
@@ -459,72 +461,154 @@ class FlashPage(Page):
 
 
 class MonitorPage(Page):
+    """原始帧监视 + 按 DBC 解析。
+
+    用的是独立开的原始帧套接字（FrameMonitor），不是 UDS 那条链路：
+    后者看到的是 ISO-TP 重组后的报文，看不到总线上真正流动的周期帧。
+    """
+
     title = "报文监视"
+    frame_seen = Signal(object)
 
-    frame_seen = Signal(str, str)
+    DEFAULT_DBC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "..", "can-node", "docs", "can_matrix.dbc")
 
-    def __init__(self, app):
+    def __init__(self, app, monitor_factory=None):
         super().__init__(app)
+        self._monitor_factory = monitor_factory or self._open_monitor
+        self._stop = False
+        self.db = None
         self.frame_seen.connect(self.append_row)
 
-        self.table = make_table(["时刻", "方向", "字节"])
-        self.table.setRowLimit = None
+        self.table = make_table(["时刻", "ID", "报文", "字节", "解析"])
+
+        self.dbc_path = QLineEdit()
+        if os.path.exists(self.DEFAULT_DBC):
+            self.dbc_path.setText(os.path.normpath(self.DEFAULT_DBC))
+        load_dbc = QPushButton("载入 DBC")
+        load_dbc.clicked.connect(self.load_dbc)
+        browse = QPushButton("…")
+        browse.setMaximumWidth(30)
+        browse.clicked.connect(self.browse_dbc)
 
         self.toggle = QPushButton("开始")
         self.toggle.clicked.connect(self.toggle_capture)
-        self.clear = QPushButton("清空")
-        self.clear.clicked.connect(lambda: self.table.setRowCount(0))
+        clear = QPushButton("清空")
+        clear.clicked.connect(lambda: self.table.setRowCount(0))
         self.keepalive = QCheckBox("保持会话（0x3E）")
         self.keepalive.setChecked(True)
 
+        top = QHBoxLayout()
+        top.addWidget(QLabel("DBC"))
+        top.addWidget(self.dbc_path)
+        top.addWidget(browse)
+        top.addWidget(load_dbc)
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.toggle)
-        buttons.addWidget(self.clear)
+        buttons.addWidget(clear)
         buttons.addWidget(self.keepalive)
         buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
+        layout.addLayout(top)
         layout.addLayout(buttons)
         layout.addWidget(self.table)
 
-        self._stop = False
+        if self.dbc_path.text():
+            self.load_dbc(quiet=True)
 
-    def toggle_capture(self):
-        if self.app.client is None:
-            self.app.log("先连接")
+    # ---------------- DBC ----------------
+
+    def browse_dbc(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 DBC", "", "DBC (*.dbc)")
+        if path:
+            self.dbc_path.setText(path)
+            self.load_dbc()
+
+    def load_dbc(self, quiet=False):
+        path = self.dbc_path.text().strip()
+        if not path:
             return
 
+        try:
+            self.db = SignalDatabase.load(path)
+        except Exception as exc:
+            self.db = None
+            self.app.log(f"DBC 载入失败：{exc}")
+            return
+
+        names = ", ".join(msg.name for msg in self.db.messages[:4])
+        if not quiet:
+            self.app.log(f"DBC 已载入：{len(self.db)} 条报文（{names}…）")
+        self.app.status.showMessage(f"DBC: {os.path.basename(path)}", 4000)
+
+    # ---------------- 采集 ----------------
+
+    def _open_monitor(self, channel):
+        return FrameMonitor(channel)
+
+    def toggle_capture(self):
         if self.toggle.text() == "停止":
             self._stop = True
             self.toggle.setText("开始")
             return
 
+        client = self.app.client
+        channel = getattr(client.link, "channel", None) if client else None
+        if client is None:
+            self.app.log("先连接")
+            return
+        if not channel and self._monitor_factory is self._open_monitor:
+            self.app.log("当前链路没有通道名，无法开原始帧监视")
+            return
+
+        try:
+            monitor = self._monitor_factory(channel)
+        except Exception as exc:
+            self.app.log(f"打开监视失败：{exc}")
+            return
+
         self._stop = False
         self.toggle.setText("停止")
-        client = self.app.client
-        link = client.link
 
         def work():
             last_ping = 0.0
-            while not self._stop:
-                now = time.monotonic()
-                if self.keepalive.isChecked() and now - last_ping > 2.0:
-                    client.tester_present()
-                    last_ping = now
-                data = link.recv(0.1)
-                if data:
-                    self.frame_seen.emit(time.strftime("%H:%M:%S"),
-                                         " ".join(f"{b:02X}" for b in data))
+            try:
+                while not self._stop:
+                    now = time.monotonic()
+                    if self.keepalive.isChecked() and now - last_ping > 2.0:
+                        try:
+                            client.tester_present()
+                        except Exception:
+                            pass
+                        last_ping = now
+                    item = monitor.read(0.1)
+                    if item is not None:
+                        self.frame_seen.emit(item)
+            finally:
+                monitor.close()
             return None
 
         self.app.run(work, lambda _: None, lambda m: self.app.log(f"监视中止：{m}"))
 
-    def append_row(self, moment, payload):
+    def append_row(self, item):
+        timestamp, frame_id, data, extended = item
+        decode = self.db.decode(frame_id, data) if self.db is not None else None
+
+        name = decode.name if decode is not None and decode.name else ""
+        if self.db is not None and decode is None:
+            name = "（DBC 无此报文）"
+
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(moment))
-        self.table.setItem(row, 1, QTableWidgetItem("rx"))
-        self.table.setItem(row, 2, QTableWidgetItem(payload))
+        self.table.setItem(row, 0, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(timestamp))))
+        id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
+        self.table.setItem(row, 1, QTableWidgetItem(id_text))
+        self.table.setItem(row, 2, QTableWidgetItem(name))
+        self.table.setItem(row, 3, QTableWidgetItem(" ".join(f"{b:02X}" for b in data)))
+        self.table.setItem(row, 4, QTableWidgetItem(decode.summary() if decode else ""))
+
         if row > 200:
             self.table.removeRow(0)
         self.table.scrollToBottom()

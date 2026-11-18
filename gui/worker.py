@@ -55,3 +55,14 @@ class TaskRunner:
 
     def busy(self):
         return bool(self._active)
+
+    def wait_all(self, timeout_ms=3000):
+        """等所有后台线程结束。
+
+        窗口关闭时不这么做，Qt 会在对象析构时发现线程还活着，
+        直接报「QThread: Destroyed while thread is still running」并崩溃。
+        监视页的采集循环是长跑任务，尤其需要这一步。
+        """
+        for worker in list(self._active):
+            if not worker.wait(timeout_ms):
+                worker.requestInterruption()

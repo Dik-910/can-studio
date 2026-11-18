@@ -102,6 +102,38 @@ class SocketCanLink(Link):
             pass
 
 
+class FrameMonitor:
+    """原始 CAN 帧监视。
+
+    单独开一个 SocketCAN 套接字，不复用 UDS 那条链路。原因：can-isotp 的
+    协议栈自己会从总线取帧并消费掉（分包重组），共用一条链路就只能看到
+    重组后的 UDS 报文，看不到总线上真实流动的帧 —— 而诊断工具最常被拿来
+    看的正是这些周期报文。
+
+    SocketCAN 上每个套接字都能收到一份完整拷贝，所以多开一条不影响传输层。
+    """
+
+    def __init__(self, channel, fd=False):
+        ensure_dependencies()
+        import can
+
+        self.channel = channel
+        self._bus = can.interface.Bus(channel=channel, interface="socketcan", fd=fd)
+
+    def read(self, timeout_s):
+        """返回 (时刻, 帧 ID, 数据, 是否扩展帧)，超时返回 None。"""
+        msg = self._bus.recv(timeout_s)
+        if msg is None:
+            return None
+        return (msg.timestamp, msg.arbitration_id, bytes(msg.data), msg.is_extended_id)
+
+    def close(self):
+        try:
+            self._bus.shutdown()
+        except Exception:
+            pass
+
+
 class RecordingLink(Link):
     """把另一个链路包一层，记录收发内容。调试和演示都用得上。"""
 

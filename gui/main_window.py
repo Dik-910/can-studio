@@ -36,6 +36,12 @@ class MainWindow(QMainWindow):
         self.runner = TaskRunner(self)
         self._post.connect(lambda fn: fn())
 
+        # 状态栏要在页面之前建好：页面构造时就会往这里写提示
+        self.status = QStatusBar()
+        self.connected_label = QLabel("未连接")
+        self.status.addPermanentWidget(self.connected_label)
+        self.setStatusBar(self.status)
+
         self.pages = [
             ConnectionPage(self),
             DidPage(self),
@@ -69,11 +75,6 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.log_view)
         splitter.setSizes([520, 160])
         self.setCentralWidget(splitter)
-
-        self.status = QStatusBar()
-        self.connected_label = QLabel("未连接")
-        self.status.addPermanentWidget(self.connected_label)
-        self.setStatusBar(self.status)
 
         self._add_menu()
         self.nav.setCurrentRow(0)
@@ -131,6 +132,11 @@ class MainWindow(QMainWindow):
     def post(self, fn):
         """从后台线程安全地回到界面线程执行 fn。"""
         self._post.emit(fn)
+
+    def closeEvent(self, event):
+        # 先把后台线程收干净再让窗口走
+        self.runner.wait_all()
+        super().closeEvent(event)
 
     def log(self, message):
         self.log_view.appendPlainText(message)

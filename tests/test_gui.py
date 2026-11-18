@@ -27,6 +27,12 @@ from fake_ecu import ScriptedEcu, negative
 
 from canstudio.uds import UdsClient
 
+try:
+    import cantools  # noqa: F401
+    HAVE_CANTOOLS = True
+except ImportError:
+    HAVE_CANTOOLS = False
+
 
 def ecu_handler(request):
     sid = request[0]
@@ -147,3 +153,126 @@ class MainWindowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+DBC_TEXT = """
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: Node
+
+BO_ 384 NodeStatus: 8 Node
+ SG_ NodeState : 0|8@1+ (1,0) [0|3] "" Node
+ SG_ BusOffCnt : 8|16@1+ (1,0) [0|65535] "" Node
+
+BO_ 512 PackData: 8 Node
+ SG_ PackVoltage : 0|16@1+ (0.01,0) [0|655.35] "V" Node
+ SG_ Soc : 32|8@1+ (1,0) [0|100] "%" Node
+"""
+
+
+class FakeMonitor:
+    """按脚本吐帧的监视器，read() 空了就稍等一下，避免空转。"""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.closed = False
+
+    def read(self, timeout_s):
+        if self.frames:
+            return self.frames.pop(0)
+        time.sleep(0.02)
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class MonitorPageTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+
+        from gui.main_window import MainWindow
+
+        self.tmp = tempfile.NamedTemporaryFile("w", suffix=".dbc", delete=False)
+        self.tmp.write(DBC_TEXT)
+        self.tmp.close()
+
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["报文监视"]
+
+    def tearDown(self):
+        self.page._stop = True
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+        os.unlink(self.tmp.name)
+
+    def start_with(self, frames):
+        monitor = FakeMonitor(frames)
+        self.page._monitor_factory = lambda channel: monitor
+        self.page.toggle_capture()
+        return monitor
+
+    def test_dbc_loaded_from_path(self):
+        self.page.dbc_path.setText(self.tmp.name)
+        self.page.load_dbc()
+        self.assertIsNotNone(self.page.db)
+        self.assertEqual(len(self.page.db), 2)
+
+    def test_frames_are_decoded_in_table(self):
+        self.page.dbc_path.setText(self.tmp.name)
+        self.page.load_dbc()
+
+        self.start_with([
+            (1000.0, 0x180, bytes([2, 0x01, 0x00, 0, 0, 0, 0, 0]), False),
+            (1001.0, 0x200, bytes([0xF8, 0x13, 0, 0, 87, 0, 0, 0]), False),
+        ])
+
+        self.assertTrue(wait_for(self.app, lambda: self.page.table.rowCount() == 2))
+        table = self.page.table
+
+        self.assertEqual(table.item(0, 1).text(), "0x180")
+        self.assertEqual(table.item(0, 2).text(), "NodeStatus")
+        self.assertIn("NodeState=2", table.item(0, 4).text())
+        self.assertIn("BusOffCnt=1", table.item(0, 4).text())
+
+        self.assertEqual(table.item(1, 2).text(), "PackData")
+        self.assertIn("PackVoltage=51.12 V", table.item(1, 4).text())
+        self.assertIn("Soc=87 %", table.item(1, 4).text())
+
+    def test_unknown_id_is_marked_but_shown(self):
+        self.page.dbc_path.setText(self.tmp.name)
+        self.page.load_dbc()
+
+        self.start_with([(1000.0, 0x555, bytes(8), False)])
+
+        self.assertTrue(wait_for(self.app, lambda: self.page.table.rowCount() == 1))
+        self.assertEqual(self.page.table.item(0, 2).text(), "（DBC 无此报文）")
+        self.assertEqual(self.page.table.item(0, 4).text(), "")
+
+    def test_without_dbc_only_raw_bytes(self):
+        self.page.dbc_path.setText("")
+        self.page.db = None
+
+        self.start_with([(1000.0, 0x180, bytes([1, 2, 3]), False)])
+
+        self.assertTrue(wait_for(self.app, lambda: self.page.table.rowCount() == 1))
+        self.assertEqual(self.page.table.item(0, 3).text(), "01 02 03")
+        self.assertEqual(self.page.table.item(0, 4).text(), "")
+
+    def test_stop_closes_monitor(self):
+        monitor = self.start_with([])
+        self.page.toggle_capture()          # 第二次点击 = 停止
+        self.assertEqual(self.page.toggle.text(), "开始")
+        self.assertTrue(wait_for(self.app, lambda: monitor.closed))

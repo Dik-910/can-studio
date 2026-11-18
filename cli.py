@@ -24,7 +24,8 @@ from canstudio import dids
 from canstudio.flash import FlashJob, load_firmware
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
-from canstudio.link import RecordingLink, SocketCanLink
+from canstudio.link import FrameMonitor, RecordingLink, SocketCanLink
+from canstudio.signals import SignalDatabase
 from canstudio.uds import SESSION_EXTENDED, UdsClient
 
 
@@ -231,21 +232,60 @@ def cmd_raw(args):
 
 
 def cmd_monitor(args):
-    client, link = open_client(args, recording=True)
+    """原始帧监视。
+
+    单独开一条链路：UDS 那条的帧会被 ISO-TP 协议栈消费掉，
+    在这里只能看到重组后的报文，看不到总线上真正流动的周期帧。
+    """
+    client, _ = open_client(args, recording=True)
+
+    db = None
+    if args.dbc:
+        try:
+            db = SignalDatabase.load(args.dbc)
+        except Exception as exc:
+            print(f"DBC 载入失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"DBC {args.dbc}：{len(db)} 条报文")
+
+    monitor = FrameMonitor(args.iface)
     print(f"监视 {args.iface}（Ctrl-C 退出）")
-    last_ping = 0.0
+    last_ping = time.monotonic()
+    seen = 0
+
     try:
         while True:
             now = time.monotonic()
             if now - last_ping > 2.0:
                 client.tester_present()
                 last_ping = now
-            data = link.recv(0.1)
-            if data:
-                print(f"{time.strftime('%H:%M:%S')}  rx  {data.hex(' ').upper()}")
+
+            item = monitor.read(0.1)
+            if item is None:
+                continue
+
+            timestamp, frame_id, data, extended = item
+            seen += 1
+            moment = time.strftime("%H:%M:%S", time.localtime(timestamp))
+            id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
+            raw = " ".join(f"{b:02X}" for b in data)
+
+            if db is None:
+                print(f"{moment}  {id_text}  {raw}")
+            else:
+                decoded = db.decode(frame_id, data)
+                if decoded is None:
+                    print(f"{moment}  {id_text}  {raw}  (DBC 无此报文)")
+                else:
+                    print(f"{moment}  {id_text}  {decoded.name:<12} {decoded.summary()}")
+
+            if args.count and seen >= args.count:
+                break
     except KeyboardInterrupt:
         print()
-        return 0
+    finally:
+        monitor.close()
+    return 0
 
 
 def build_parser():
@@ -315,7 +355,9 @@ def build_parser():
     p.add_argument("bytes", nargs="+")
     p.set_defaults(func=cmd_raw)
 
-    p = sub.add_parser("monitor", parents=[common], help="被动监视并保持会话")
+    p = sub.add_parser("monitor", parents=[common], help="原始帧监视，可按 DBC 解析")
+    p.add_argument("--dbc", help="DBC 文件，给了就按信号显示")
+    p.add_argument("--count", type=int, default=0, help="收到这么多帧后退出，0 表示一直跑")
     p.set_defaults(func=cmd_monitor)
 
     return parser

@@ -49,6 +49,28 @@ def pump(app, seconds):
         time.sleep(0.01)
 
 
+class SampleMonitor:
+    """给截图用的假监视器：吐几帧真实格式的报文，然后停住。"""
+
+    frames = [
+        (0.0, 0x180, bytes([2, 0, 0x00, 0x00, 0x9C, 0x01, 0x00, 0x00]), False),
+        (0.0, 0x200, bytes([0xF8, 0x13, 0x9C, 0xFF, 87, 65, 0, 0]), False),
+        (0.0, 0x181, bytes([0, 0, 0x99, 0x00, 0, 0, 0, 0]), False),
+        (0.0, 0x180, bytes([2, 0, 0x00, 0x00, 0x9D, 0x01, 0x00, 0x00]), False),
+        (0.0, 0x200, bytes([0xF9, 0x13, 0x9C, 0xFF, 87, 65, 0, 0]), False),
+    ]
+
+    def read(self, timeout_s):
+        if self.frames:
+            ts, fid, data, ext = self.frames.pop(0)
+            return (time.time(), fid, data, ext)
+        time.sleep(0.02)
+        return None
+
+    def close(self):
+        pass
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "docs", "screenshot.png")
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -71,10 +93,22 @@ def main():
     pages["故障码"].read_button.click()
     pump(app, 0.8)
 
+    # 监视页：载入 can-node 的 DBC 并灌几帧
+    monitor = pages["报文监视"]
+    dbc = os.path.normpath(os.path.join(HERE, "..", "can-node", "docs", "can_matrix.dbc"))
+    if os.path.exists(dbc):
+        monitor.dbc_path.setText(dbc)
+        monitor.load_dbc()
+        monitor._monitor_factory = lambda channel: SampleMonitor()
+        monitor.toggle_capture()
+        pump(app, 0.5)
+        monitor.toggle_capture()
+
     window.log("已连接 vcan0 0x7E0 → 0x7E8")
     window.log("0xF190 VIN = LSVAA1234567890AB")
     window.log("读到 3 条故障")
-    window.nav.setCurrentRow(1)
+    window.log("DBC 已载入：5 条报文（NodeStatus, BusStatus, PackData, FaultEvent…）")
+    window.nav.setCurrentRow(4)
     pump(app, 0.3)
 
     pixmap = window.grab()
