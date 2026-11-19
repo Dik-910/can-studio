@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QDoubleSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -159,19 +160,24 @@ class ConnectionPage(Page):
 
 
 class DidPage(Page):
+    """DID 读写与周期读取。
+
+    表来自 app.did_table，可以随时换成别的 ECU 的配置 —— 换 ECU 不该改源码。
+    """
+
     title = "数据标识"
 
     def __init__(self, app):
         super().__init__(app)
+        self.specs = []
 
-        self.table = make_table(["名称", "DID", "值"])
-        self.table.setRowCount(len(dids.KNOWN_DIDS))
-        self.specs = sorted(dids.KNOWN_DIDS.values(), key=lambda s: s.did)
+        self.table = make_table(["名称", "DID", "值", "属性"])
+        self.table.setColumnWidth(3, 60)
 
-        for row, spec in enumerate(self.specs):
-            self.table.setItem(row, 0, QTableWidgetItem(spec.name))
-            self.table.setItem(row, 1, QTableWidgetItem(f"0x{spec.did:04X}"))
-            self.table.setItem(row, 2, QTableWidgetItem("—"))
+        self.table_path = QLineEdit()
+        self.table_path.setReadOnly(True)
+        load_table = QPushButton("载入表")
+        load_table.clicked.connect(self.browse_table)
 
         self.read_all = QPushButton("全部读取")
         self.read_all.clicked.connect(lambda: self.read(self.specs))
@@ -179,9 +185,26 @@ class DidPage(Page):
         self.read_one.clicked.connect(self.read_selected)
         self.write_one = QPushButton("写入选中")
         self.write_one.clicked.connect(self.write_selected)
-
         self.value_edit = QLineEdit()
         self.value_edit.setPlaceholderText("十六进制字节，如 3C")
+
+        self.poll = QCheckBox("周期读取")
+        self.poll.toggled.connect(self.toggle_polling)
+        self.interval = QDoubleSpinBox()
+        self.interval.setRange(0.2, 30.0)
+        self.interval.setSingleStep(0.5)
+        self.interval.setValue(1.0)
+        self.interval.setSuffix(" s")
+        self.interval.setMaximumWidth(90)
+
+        from PySide6.QtCore import QTimer
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll_once)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("DID 表"))
+        top.addWidget(self.table_path)
+        top.addWidget(load_table)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.read_all)
@@ -189,14 +212,58 @@ class DidPage(Page):
         buttons.addWidget(self.value_edit)
         buttons.addWidget(self.write_one)
         buttons.addStretch(1)
+        buttons.addWidget(self.poll)
+        buttons.addWidget(self.interval)
 
         layout = QVBoxLayout(self)
+        layout.addLayout(top)
         layout.addLayout(buttons)
         layout.addWidget(self.table)
 
+        self.rebuild()
+
+    # ---------------- 表 ----------------
+
+    def rebuild(self):
+        table = self.app.did_table
+        self.specs = list(table)
+        self.table_path.setText(table.path or f"内置表（{table.name}）")
+        self.table.setRowCount(len(self.specs))
+
+        for row, spec in enumerate(self.specs):
+            self.table.setItem(row, 0, QTableWidgetItem(spec.name))
+            self.table.setItem(row, 1, QTableWidgetItem(f"0x{spec.did:04X}"))
+            self.table.setItem(row, 2, QTableWidgetItem("—"))
+            marker = QTableWidgetItem("可写" if spec.writable else "")
+            self.table.setItem(row, 3, marker)
+
+    def browse_table(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 DID 表", "config",
+                                              "JSON (*.json)")
+        if path:
+            self.apply_table(path)
+
+    def apply_table(self, path):
+        """切换到另一张 DID 表。载入失败时保留原表，不让界面变空。"""
+        from canstudio.dids import DidTable
+
+        try:
+            table = DidTable.load(path)
+        except Exception as exc:
+            self.app.log(f"DID 表载入失败：{exc}")
+            return False
+
+        self.app.did_table = table
+        self.stop_polling()
+        self.rebuild()
+        self.app.log(f"DID 表已切换：{len(table)} 项（{path}）")
+        return True
+
+    # ---------------- 读取 ----------------
+
     def read_selected(self):
-        rows = {i.row() for i in self.table.selectedIndexes()}
-        self.read([self.specs[r] for r in sorted(rows)])
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        self.read([self.specs[r] for r in rows])
 
     def read(self, specs):
         if not specs:
@@ -206,29 +273,49 @@ class DidPage(Page):
         if client is None:
             return
 
-        for spec in specs:
-            self.app.run(lambda s=spec: (s.did, client.read_did(s.did)),
-                         self.on_value, self.on_error)
+        # 一次后台任务读完所有 DID：每个 DID 单开线程会瞬间堆出几十个线程
+        def work():
+            results = []
+            for spec in specs:
+                try:
+                    results.append((spec.did, client.read_did(spec.did), None))
+                except Exception as exc:
+                    results.append((spec.did, None, str(exc)))
+            return results
 
-    def on_value(self, item):
-        did, raw = item
-        label, value = dids.describe(did, raw)
-        for row, spec in enumerate(self.specs):
-            if spec.did == did:
-                self.table.setItem(row, 2, QTableWidgetItem(value))
-                break
-        self.app.log(f"0x{did:04X} {label} = {value}")
+        self.app.run(work, self.on_values, self.on_error)
+
+    def on_values(self, results):
+        changed = []
+        for did, raw, error in results:
+            row = next((i for i, spec in enumerate(self.specs) if spec.did == did), None)
+            if row is None:
+                continue
+
+            if error is not None:
+                self.table.setItem(row, 2, QTableWidgetItem(f"<{error}>"))
+                continue
+
+            label, value = self.app.did_table.describe(did, raw)
+            previous = self.table.item(row, 2).text()
+            self.table.setItem(row, 2, QTableWidgetItem(value))
+            if previous not in ("—", value):
+                changed.append(f"{label}={value}")
+        if changed:
+            self.app.log("变化：" + "  ".join(changed))
 
     def on_error(self, message):
         self.app.log(f"读取失败：{message}")
 
+    # ---------------- 写入 ----------------
+
     def write_selected(self):
-        rows = {i.row() for i in self.table.selectedIndexes()}
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
         if len(rows) != 1:
             self.app.log("写入前请选中一行")
             return
 
-        spec = self.specs[sorted(rows)[0]]
+        spec = self.specs[rows[0]]
         if not spec.writable:
             self.app.log(f"{spec.name} 不可写")
             return
@@ -248,17 +335,48 @@ class DidPage(Page):
             return
 
         def work():
-            client.change_session(0x03)
+            client.change_session(spec.session if spec.session > 0x01 else 0x03)
             client.unlock(1)
             client.write_did(spec.did, data)
             return client.read_did(spec.did)
 
-        self.app.run(work, self.on_value_did(spec.did), self.on_error)
+        self.app.run(work, lambda raw: self.on_values([(spec.did, raw, None)]),
+                     self.on_error)
 
-    def on_value_did(self, did):
-        def handler(raw):
-            self.on_value((did, raw))
-        return handler
+    # ---------------- 周期读取 ----------------
+
+    def toggle_polling(self, enabled):
+        if enabled:
+            if self.app.client is None:
+                self.poll.setChecked(False)
+                self.app.log("先连接再开周期读取")
+                return
+            self.timer.start(int(self.interval.value() * 1000))
+            self.app.log(f"周期读取已开启，{self.interval.value():.1f} s")
+        else:
+            self.stop_polling()
+
+    def stop_polling(self):
+        if self.timer.isActive():
+            self.timer.stop()
+        if self.poll.isChecked():
+            self.poll.blockSignals(True)
+            self.poll.setChecked(False)
+            self.poll.blockSignals(False)
+            self.app.log("周期读取已停止")
+
+    def poll_once(self):
+        # 上一轮还没跑完就跳过这一拍，否则请求会在总线上堆积
+        if self.app.runner.busy() or self.app.client is None:
+            return
+        self.read(self.specs)
+
+    def on_enter(self):
+        pass
+
+    def set_client(self, client):
+        if client is None:
+            self.stop_polling()
 
 
 class DtcPage(Page):

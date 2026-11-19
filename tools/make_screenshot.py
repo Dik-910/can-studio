@@ -30,6 +30,7 @@ def handler(request):
             0x0201: b"\x3C",
             0x0301: bytes.fromhex("8F2C1A44"),
             0x0302: b"\x00\x01\x02",
+            0x0001: bytes.fromhex("01AA080000F8"),
         }
         if did in table:
             return bytes([0x62]) + request[1:3] + table[did]
@@ -69,6 +70,13 @@ class SampleMonitor:
 
     def close(self):
         pass
+
+
+def render(app, window, out):
+    pixmap = window.grab()
+    ok = pixmap.save(out)
+    print(f"{'已生成' if ok else '保存失败'}: {out}  ({pixmap.width()}x{pixmap.height()})")
+    return ok
 
 
 def main():
@@ -111,9 +119,18 @@ def main():
     window.nav.setCurrentRow(4)
     pump(app, 0.3)
 
-    pixmap = window.grab()
-    ok = pixmap.save(out)
-    print(f"{'已生成' if ok else '保存失败'}: {out}  ({pixmap.width()}x{pixmap.height()})")
+    ok = render(app, window, out)
+
+    # 第二张：DID 页，带周期读取
+    did_page = pages["数据标识"]
+    did_page.interval.setValue(0.5)
+    did_page.poll.setChecked(True)
+    pump(app, 0.6)
+    did_page.poll.setChecked(False)
+    window.nav.setCurrentRow(1)
+    pump(app, 0.3)
+    ok = render(app, window, out.replace(".png", "-dids.png")) and ok
+
     return 0 if ok else 1
 
 

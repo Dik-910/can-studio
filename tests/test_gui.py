@@ -276,3 +276,91 @@ class MonitorPageTest(unittest.TestCase):
         self.page.toggle_capture()          # 第二次点击 = 停止
         self.assertEqual(self.page.toggle.text(), "开始")
         self.assertTrue(wait_for(self.app, lambda: monitor.closed))
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+class DidTablePageTest(unittest.TestCase):
+    """DID 表可换、可周期读取 —— 这两条是「换个 ECU 不用改源码」的前提。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+
+        from gui.main_window import MainWindow
+
+        payload = {
+            "ecu": "测试 ECU",
+            "dids": [
+                {"id": "0x0101", "name": "电池电压", "length": 2, "decode": "millivolt"},
+                {"id": "0x0201", "name": "过压阈值", "length": 1, "decode": "uint8",
+                 "writable": True, "session": "extended"},
+            ],
+        }
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                             encoding="utf-8")
+        import json
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.close()
+        self.config = handle.name
+
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["数据标识"]
+
+    def tearDown(self):
+        self.page.stop_polling()
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+        os.unlink(self.config)
+
+    def test_default_table_is_builtin(self):
+        self.assertEqual(self.page.table.rowCount(), len(self.window.did_table))
+        self.assertIn("内置表", self.page.table_path.text())
+
+    def test_switch_table_rebuilds_rows(self):
+        self.assertTrue(self.page.apply_table(self.config))
+
+        self.assertEqual(self.page.table.rowCount(), 2)
+        self.assertEqual(self.page.table.item(0, 0).text(), "电池电压")
+        self.assertEqual(self.page.table.item(1, 3).text(), "可写")
+        self.assertIn(self.config, self.page.table_path.text())
+
+    def test_broken_table_keeps_previous(self):
+        before = self.page.table.rowCount()
+
+        self.assertFalse(self.page.apply_table("/nonexistent/table.json"))
+        self.assertEqual(self.page.table.rowCount(), before)
+        self.assertIn("DID 表载入失败", self.window.log_view.toPlainText())
+
+    def test_polling_fills_values_and_stops(self):
+        self.page.apply_table(self.config)
+        self.page.interval.setValue(0.2)
+        self.page.poll.setChecked(True)
+
+        self.assertTrue(self.page.timer.isActive())
+        self.assertTrue(wait_for(
+            self.app, lambda: self.page.table.item(0, 2).text() != "—"))
+        self.assertIn("3660 mV", self.page.table.item(0, 2).text())
+
+        self.page.poll.setChecked(False)
+        self.assertFalse(self.page.timer.isActive())
+
+    def test_polling_requires_connection(self):
+        self.window.set_client(None)
+        self.page.poll.setChecked(True)
+
+        self.assertFalse(self.page.poll.isChecked(), "无连接时不该真的开起来")
+        self.assertFalse(self.page.timer.isActive())
+        self.assertIn("先连接再开周期读取", self.window.log_view.toPlainText())
+
+    def test_disconnect_stops_polling(self):
+        self.page.apply_table(self.config)
+        self.page.poll.setChecked(True)
+        self.assertTrue(self.page.timer.isActive())
+
+        self.window.set_client(None)
+        self.assertFalse(self.page.timer.isActive(), "断开后必须停掉定时器")

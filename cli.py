@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from canstudio import dtc as dtc_mod
 from canstudio import dids
+from canstudio.dids import DEFAULT_TABLE, DidTable
 from canstudio.flash import FlashJob, load_firmware
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
@@ -36,6 +37,22 @@ def open_client(args, recording=False):
     if recording:
         link = RecordingLink(link)
     return UdsClient(link, p2_ms=args.p2, key_algo=_key_algo(args)), link
+
+
+def load_did_table(args):
+    """按 --did-table 载入 DID 表，没给就用内置默认表。"""
+    path = getattr(args, "did_table", None)
+    if not path:
+        return DEFAULT_TABLE
+
+    try:
+        table = DidTable.load(path)
+    except Exception as exc:
+        print(f"DID 表载入失败：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+    print(f"DID 表 {path}：{len(table)} 项（{table.name}）", file=sys.stderr)
+    return table
 
 
 def _key_algo(args):
@@ -78,12 +95,13 @@ def cmd_reset(args):
 
 def cmd_did_read(args):
     client, _ = open_client(args)
+    table = load_did_table(args)
     if args.unlock:
         require_session(client, SESSION_EXTENDED, args)
 
     failed = 0
     for name in args.dids:
-        spec = find(name)
+        spec = table.find(name)
         if spec is None:
             print(f"{name}: 无法识别的 DID", file=sys.stderr)
             failed += 1
@@ -94,14 +112,15 @@ def cmd_did_read(args):
             print(f"0x{spec.did:04X} {spec.name}: {exc}", file=sys.stderr)
             failed += 1
             continue
-        label, value = describe(spec.did, raw)
+        label, value = table.describe(spec.did, raw)
         print(f"0x{spec.did:04X}  {label:<12} {value}")
     return 0 if failed == 0 else 1
 
 
 def cmd_did_write(args):
     client, _ = open_client(args)
-    spec = find(args.did)
+    table = load_did_table(args)
+    spec = table.find(args.did)
     if spec is None:
         print(f"无法识别的 DID: {args.did}", file=sys.stderr)
         return 1
@@ -116,6 +135,57 @@ def cmd_did_write(args):
         client.unlock(1)
     client.write_did(spec.did, data)
     print(f"0x{spec.did:04X} {spec.name} 写入成功（{len(data)} 字节）")
+    return 0
+
+
+def cmd_did_watch(args):
+    """周期读取 DID，值变化时标出来。
+
+    现场最常见的用法：改一个参数，盯着它和相邻的几个量看变化。
+    """
+    client, _ = open_client(args)
+    table = load_did_table(args)
+
+    specs = [table.find(name) for name in args.dids] if args.dids else list(table)
+    specs = [s for s in specs if s is not None]
+    if not specs:
+        print("没有可监视的 DID", file=sys.stderr)
+        return 1
+
+    if args.unlock:
+        require_session(client, SESSION_EXTENDED, args)
+
+    previous = {}
+    rounds = 0
+    try:
+        while True:
+            moment = time.strftime("%H:%M:%S")
+            parts = []
+            changed = []
+
+            for spec in specs:
+                try:
+                    raw = client.read_did(spec.did)
+                except (NegativeResponse, TransportTimeout) as exc:
+                    parts.append(f"{spec.name}=<{exc}>")
+                    continue
+
+                label, value = table.describe(spec.did, raw)
+                parts.append(f"{label}={value}")
+                if spec.did in previous and previous[spec.did] != value:
+                    changed.append(label)
+                previous[spec.did] = value
+
+            mark = f"  *变化 {','.join(changed)}" if changed else ""
+            print(f"[{moment}] " + "  ".join(parts) + mark, flush=True)
+
+            rounds += 1
+            if args.count and rounds >= args.count:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+
     return 0
 
 
@@ -295,6 +365,7 @@ def build_parser():
     common.add_argument("--rx", type=lambda s: int(s, 0), default=0x7E8, help="响应 ID")
     common.add_argument("--p2", type=int, default=50, help="P2 窗口（毫秒）")
     common.add_argument("--key-file", help="提供 key_algo 的 python 文件，换 ECU 用")
+    common.add_argument("--did-table", help="DID 表 JSON；不给则用内置默认表")
     common.add_argument("--no-session", action="store_true", help="不自动切会话")
 
     parser = argparse.ArgumentParser(prog="can-studio", description=__doc__,
@@ -316,6 +387,13 @@ def build_parser():
     q.add_argument("dids", nargs="+", help="DID 数值或名字，如 0xF190 / VIN")
     q.add_argument("--unlock", action="store_true", help="读之前先切扩展会话并解锁")
     q.set_defaults(func=cmd_did_read)
+
+    q = did_sub.add_parser("watch", parents=[common], help="周期读取，变化处标出")
+    q.add_argument("dids", nargs="*", help="要监视的 DID；省略则监视整张表")
+    q.add_argument("--interval", type=float, default=1.0, help="周期（秒）")
+    q.add_argument("--count", type=int, default=0, help="采这么多轮后退出，0 表示一直跑")
+    q.add_argument("--unlock", action="store_true", help="先切扩展会话并解锁")
+    q.set_defaults(func=cmd_did_watch)
 
     q = did_sub.add_parser("write", parents=[common], help="写 DID")
     q.add_argument("did")

@@ -1,0 +1,44 @@
+{
+  "ecu": "can-node ecu-server",
+  "note": "DID 表跟着 ECU 走。换 ECU 时复制一份改这里，界面里载入即可，不必改源码。",
+  "dids": [
+    {
+      "id": "0xF190",
+      "name": "VIN",
+      "length": 17,
+      "decode": "ascii",
+      "session": "default"
+    },
+    {
+      "id": "0x0101",
+      "name": "电池电压",
+      "length": 2,
+      "decode": "millivolt",
+      "unit": "V"
+    },
+    {
+      "id": "0x0201",
+      "name": "过压阈值",
+      "length": 1,
+      "decode": "uint8",
+      "writable": true,
+      "session": "extended"
+    },
+    {
+      "id": "0x0301",
+      "name": "刷写摘要",
+      "decode": "hex"
+    },
+    {
+      "id": "0x0302",
+      "name": "故障存储概览",
+      "length": 3,
+      "decode": "dtc_stats"
+    },
+    {
+      "id": "0x0001",
+      "name": "故障上下文",
+      "decode": "hex"
+    }
+  ]
+}

@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from canstudio.dids import DEFAULT_TABLE
+
 from .pages import (ConnectionPage, DidPage, DtcPage, FlashPage, MonitorPage,
                     describe_link)
 from .worker import TaskRunner
@@ -33,6 +35,8 @@ class MainWindow(QMainWindow):
         self.resize(1000, 680)
 
         self.client = None
+        # 页面构造时就要用这张表，所以必须在这里先备好
+        self.did_table = DEFAULT_TABLE
         self.runner = TaskRunner(self)
         self._post.connect(lambda fn: fn())
 

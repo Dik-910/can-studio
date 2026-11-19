@@ -31,11 +31,13 @@ gui/                 界面：五页 Qt 窗口，只调用上面四层，不含�
 | `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
 | `gui/` | 已实现：连接、DID、故障码、刷写、报文监视五页（PySide6） |
 
-测试 97 项，全部不依赖 CAN 接口与显示器。
+测试 124 项，全部不依赖 CAN 接口与显示器。
 
 ## 界面
 
-![主界面](docs/screenshot.png)
+![报文监视](docs/screenshot.png)
+
+![数据标识](docs/screenshot-dids.png)
 
 左栏五个功能页，底部是操作日志，状态栏显示当前连接。所有耗时操作都走后台
 线程，界面不会因为一次 P2 超时而假死。
@@ -48,6 +50,42 @@ SocketCAN 套接字，所以能看到总线上真实流动的周期帧（ISO-TP 
 ```bash
 ./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc
 ```
+
+DID 页支持周期读取：勾上「周期读取」并设定间隔，表格按拍刷新；两次之间
+值发生变化时会在日志里点出来。命令行等价物是 `did watch`：
+
+```bash
+./cli.py did watch --did-table config/dids.json --interval 1
+```
+
+## DID 表
+
+DID 表跟着 ECU 走，所以它是配置而不是代码。默认表在 `config/dids.json`，
+与内置表一致（有用例守着，两者不会悄悄分叉）。
+
+```json
+{
+  "ecu": "can-node ecu-server",
+  "dids": [
+    {"id": "0xF190", "name": "VIN", "length": 17, "decode": "ascii"},
+    {"id": "0x0101", "name": "电池电压", "length": 2, "decode": "millivolt"},
+    {"id": "0x0201", "name": "过压阈值", "length": 1, "decode": "uint8",
+     "writable": true, "session": "extended"}
+  ]
+}
+```
+
+`decode` 可选：`ascii` / `hex` / `millivolt` / `dtc_stats`，以及
+`uint8` `uint16` `uint32` `int8` `int16` `int32`（可带 `scale` 与 `unit`）。
+数值一律按**大端**解 —— UDS 用网络字节序，与 DBC 常见的 Intel 小端相反，
+弄反会得到完全错误的数字。
+
+`id` 支持 `"0xF190"` / `"F190"` / `61712`；`session` 支持 `"default"` /
+`"extended"` / `"programming"`。解码方式写错不会让整张表失效，回落到
+十六进制显示。
+
+界面里「载入表」换一张；命令行加 `--did-table <path>`。载入失败时保留原表，
+不会把界面刷成空的。
 
 ```bash
 ./studio.py          # 图形界面
@@ -204,3 +242,27 @@ pip install python-can can-isotp bincopy PySide6-Essentials
 ```
 
 测试只依赖标准库：假链路代替 SocketCAN，离屏后端代替显示器。
+
+## 本地跑起来看实时通信
+
+三步，都在同一台机器上：
+
+```bash
+# 1. 建虚拟总线（重启后要重建，vcan 是运行时接口）
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0
+
+# 2. 让总线上有真实流量：can-node 的节点程序每 100ms 发 0x180、每 20ms 发 0x181
+cd ../can-node && make node && ./node --if vcan0
+
+# 3. 开上位机
+cd ../can-studio && ./studio.py
+```
+
+界面里连 `vcan0`（0x7E0 / 0x7E8），然后：
+
+- **报文监视**：点「开始」，能看到 `0x180 NodeStatus` 与 `0x181 BusStatus`
+  按周期刷新，`NodeState`、`BusOpCnt`、`UptimeS`、`Tec`/`Rec` 由 DBC 解出
+- **数据标识**：点「全部读取」读 VIN 与电压；勾「周期读取」看电压跳动
+
+没有 PySide6 也可以只用命令行：`./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc`。
