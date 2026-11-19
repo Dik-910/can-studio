@@ -442,6 +442,11 @@ def build_parser():
 
 
 def main(argv=None):
+    # 输出重定向到文件/管道时 Python 默认整块缓冲，进程被 Ctrl-C 或 timeout
+    # 杀掉，缓冲区里的内容就全丢了 —— 长时间跑监视最容易踩到
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
     parser = build_parser()
     args = parser.parse_args(argv)
     args.no_unlock = getattr(args, "no_unlock", False)

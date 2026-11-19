@@ -142,6 +142,8 @@ $ ./cli.py did read 0x0201
 | `raw 22 F1 90` | 原始响应 `62 F1 90 4C 53 56 41 ...` |
 | `flash fw.hex -y` | 2048 字节 / 9 块 / 0.05 s，ECU 侧算出的 CRC32 与本机一致 |
 | `monitor --dbc can_matrix.dbc` | `0x200` 解为 `PackVoltage=51.12 V  PackCurrent=-1 A  Soc=87 %  TempMax=25 degC` |
+| `monitor`（对真实节点） | `0x180 NodeStatus  NodeState=1  ErrLevel=0  BusOffCnt=0  UptimeS=4 s`，0x181 每 20 ms、0x180 每 100 ms 刷新 |
+| 界面监视页（对真实节点） | 离屏加载界面连 vcan0，抓到 6 帧并解出 `NodeStatus` / `BusStatus` |
 
 监视页拿到真实帧时的输出（DBC 用 can-node 的 `docs/can_matrix.dbc`）：
 
@@ -266,3 +268,7 @@ cd ../can-studio && ./studio.py
 - **数据标识**：点「全部读取」读 VIN 与电压；勾「周期读取」看电压跳动
 
 没有 PySide6 也可以只用命令行：`./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc`。
+
+一个诊断地址对（`0x7E0` / `0x7E8`）同一时刻只能有一个 tester：界面已经连上时，
+再从命令行发诊断请求会互相抢响应。看报文不受影响（监视是独立套接字、只收不发），
+但界面和命令行别同时做诊断。
