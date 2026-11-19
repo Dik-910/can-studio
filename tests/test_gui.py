@@ -571,3 +571,46 @@ class MonitorChartTest(unittest.TestCase):
                                   bytes([1, 0, 0, 0, 0, 0, 0, 0]), False))
 
         self.assertFalse(self.page.chart.grab().toImage().isNull())
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class MonitorUplinkTest(unittest.TestCase):
+    """MQTT 上行进来的是「窗口内聚合」的一条消息，带聚合帧数 n。"""
+
+    def setUp(self):
+        from gui.main_window import MainWindow
+
+        self.app = QApplication.instance() or QApplication([])
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["报文监视"]
+
+    def tearDown(self):
+        self.page._stop = True
+        self.page.stop_source()
+        self.page.chart._timer.stop()
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+
+    def test_source_selector_has_mqtt(self):
+        items = [self.page.source.itemData(i) for i in range(self.page.source.count())]
+        self.assertEqual(items, ["can", "mqtt"])
+
+    def test_aggregated_message_shows_count_and_counts_frames(self):
+        self.page.append_row((1000.0, 0x180, bytes([1, 0, 0, 0, 5, 0, 0, 0]), False, 10))
+
+        self.assertEqual(self.page.table.rowCount(), 1)
+        self.assertIn("×10", self.page.table.item(0, 2).text())
+        # 计数按聚合帧数累加，等价于「总线上出现过多少帧」
+        self.assertEqual(self.page.counts[0x180], 10)
+
+    def test_plain_frame_has_no_suffix(self):
+        self.page.append_row((1000.0, 0x180, bytes(8), False))
+        self.assertEqual(self.page.table.item(0, 2).text(), "NodeStatus")
+        self.assertEqual(self.page.counts[0x180], 1)
+
+    def test_stop_source_is_safe_when_not_connected(self):
+        self.page.stop_source()          # 不该抛异常
+        self.assertIsNone(self.page._uplink)

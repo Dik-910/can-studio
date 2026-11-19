@@ -11,6 +11,7 @@ canstudio/uds.py     协议：ISO 14229 请求编码、响应解码、否定响�
 canstudio/dtc.py     语义：故障码、状态位、快照的解读
 canstudio/flash.py   流程：0x34/36/37 编排、重试、进度、CRC 交叉校验
 canstudio/signals.py 语义：按 DBC 把 CAN 帧解成信号值
+canstudio/uplink.py  数据源：订阅网关的 MQTT 上行，还原成帧
 gui/                 界面：五页 Qt 窗口，只调用上面四层，不含协议编码
 ```
 
@@ -28,10 +29,11 @@ gui/                 界面：五页 Qt 窗口，只调用上面四层，不含�
 | `canstudio/dids.py` | 已实现：DID 表与解码，未知 DID 按原始字节展示 |
 | `canstudio/flash.py` | 已实现：HEX/S-record 解析、分块、序号回绕、重试、CRC 交叉校验 |
 | `canstudio/signals.py` | 已实现：DBC 载入与帧解码，未知报文不中断监视 |
+| `canstudio/uplink.py` | 已实现：MQTT 上行订阅与解析（聚合报文还原成帧） |
 | `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
 | `gui/` | 已实现：连接、DID、故障码、刷写、报文监视五页（PySide6） |
 
-测试 124 项，全部不依赖 CAN 接口与显示器。
+测试 183 项，全部不依赖 CAN 接口与显示器。
 
 ## 界面
 
@@ -65,6 +67,37 @@ DID 页支持周期读取：勾上「周期读取」并设定间隔，表格按�
 ```bash
 ./cli.py did watch --did-table config/dids.json --interval 1
 ```
+
+## 网关后面怎么看总线状态
+
+站在网关后面时，**总线上的周期帧是看不到的**：网关只转发诊断流量，
+不会把整条总线复制到另一侧（`can-gateway` 的 `system.conf` 就是这么配的，
+实测确认）。要在这种拓扑下看「节点状态 / 总线状态」，只能读网关的 MQTT 上行。
+
+监视页的数据源选「网关 MQTT」，或命令行：
+
+```bash
+./cli.py monitor --mqtt --dbc ../can-node/docs/can_matrix.dbc
+```
+
+上行格式（`can-gateway` 的 `route_engine.c:on_agg_export`）：
+
+```json
+{"gw":"can-gateway","ch":"vcan1","id":"0x181","n":101,"dlc":8,"d":"0000000000000000","ts":123456789}
+```
+
+`n` 是这窗口里聚合到的帧数，所以表格里显示成 `BusStatus ×101`。
+这个数字能反过来校验周期：0x180 每 100 ms 一帧，1 秒窗口应当是 ×10。
+
+实测（节点在 vcan1、网关、上位机读 MQTT）：
+
+```
+0x180  NodeStatus  ×10  NodeState=1  ErrLevel=0  BusOffCnt=0  UptimeS=4 s
+0x181  BusStatus   ×101 Tec=0  Rec=0  BusLoadPermille=0 permille
+```
+
+注意 `ts` 是网关的单调时钟毫秒，不是墙上时间，所以表格显示的是收到消息的
+本地时刻，`ts` 只留给排查用。
 
 ## DID 表
 

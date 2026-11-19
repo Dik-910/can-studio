@@ -27,6 +27,7 @@ from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
 from canstudio.link import FrameMonitor, RecordingLink, SocketCanLink
 from canstudio.signals import SignalDatabase, format_timestamp, parse_id_filter
+from canstudio.uplink import UplinkSource, parse_broker
 from canstudio.uds import SESSION_EXTENDED, UdsClient
 
 
@@ -301,12 +302,75 @@ def cmd_raw(args):
     return 0
 
 
+def cmd_monitor_mqtt(args):
+    """读网关的 MQTT 上行。
+
+    站在网关后面时总线上的周期帧看不到（网关不复制整条总线），
+    只能靠这条通道看节点与总线状态。
+    """
+    host, port = parse_broker(args.broker)
+    topic = args.topic or "gw/can"
+
+    db = None
+    if args.dbc:
+        try:
+            db = SignalDatabase.load(args.dbc)
+        except Exception as exc:
+            print(f"DBC 载入失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"DBC {args.dbc}：{len(db)} 条报文")
+
+    only = parse_id_filter(args.ids)
+    seen = 0
+
+    def on_frame(frame):
+        nonlocal seen
+        if only and frame.frame_id not in only:
+            return
+        seen += 1
+        moment = time.strftime("%H:%M:%S")
+        id_text = f"0x{frame.frame_id:03X}"
+        if db is None:
+            print(f"{moment}  {id_text}  {frame.data.hex(' ').upper()}  ×{frame.count}")
+            return
+
+        decoded = db.decode(frame.frame_id, frame.data)
+        if decoded is None:
+            print(f"{moment}  {id_text}  {frame.data.hex(' ').upper()}  ×{frame.count}")
+        else:
+            print(f"{moment}  {id_text}  {decoded.name:<12} ×{frame.count:<3} "
+                  f"{decoded.summary()}")
+
+    source = UplinkSource(host, port, topic, on_frame=on_frame,
+                          on_state=lambda text: print(text))
+    try:
+        source.start()
+    except Exception as exc:
+        print(f"上行连接失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(f"订阅 {host}:{port} {topic}（Ctrl-C 退出）")
+    try:
+        while not args.count or seen < args.count:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        source.stop()
+
+    print(f"共 {source.received} 条上行消息，丢弃 {source.dropped} 条")
+    return 0
+
+
 def cmd_monitor(args):
     """原始帧监视。
 
     单独开一条链路：UDS 那条的帧会被 ISO-TP 协议栈消费掉，
     在这里只能看到重组后的报文，看不到总线上真正流动的周期帧。
     """
+    if args.mqtt:
+        return cmd_monitor_mqtt(args)
+
     client, _ = open_client(args, recording=True)
 
     db = None
@@ -442,12 +506,21 @@ def build_parser():
     p.add_argument("--dbc", help="DBC 文件，给了就按信号显示")
     p.add_argument("--count", type=int, default=0, help="收到这么多帧后退出，0 表示一直跑")
     p.add_argument("--id", dest="ids", default="", help="只看这些 ID，如 0x180,0x181")
+    p.add_argument("--mqtt", action="store_true", help="改读网关的 MQTT 上行")
+    p.add_argument("--broker", default="127.0.0.1:1883", help="broker 地址 host:port")
+    p.add_argument("--topic", default="gw/can", help="上行主题")
     p.set_defaults(func=cmd_monitor)
 
     return parser
 
 
 def main(argv=None):
+    # 依赖目录要尽早挂上：--mqtt 分支不会走 open_client，
+    # 那里面的 ensure_dependencies 就轮不到执行，cantools 会 import 失败
+    from canstudio.link import ensure_dependencies
+
+    ensure_dependencies()
+
     # 输出重定向到文件/管道时 Python 默认整块缓冲，进程被 Ctrl-C 或 timeout
     # 杀掉，缓冲区里的内容就全丢了 —— 长时间跑监视最容易踩到
     if hasattr(sys.stdout, "reconfigure"):

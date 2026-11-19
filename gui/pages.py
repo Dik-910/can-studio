@@ -604,6 +604,7 @@ class MonitorPage(Page):
         self.filtered_out = 0
         self.held = 0
         self.counts = {}
+        self._uplink = None
         self.frame_seen.connect(self.append_row)
 
         self.table = make_table(["时刻", "ID", "报文", "字节", "解析"])
@@ -629,6 +630,25 @@ class MonitorPage(Page):
         top.addWidget(self.dbc_path)
         top.addWidget(browse)
         top.addWidget(load_dbc)
+
+        # 数据源：直连总线，或读网关的 MQTT 上行。
+        # 站在网关后面时总线上的周期帧看不到，只能走 MQTT
+        self.source = QComboBox()
+        self.source.addItem("CAN 接口", "can")
+        self.source.addItem("网关 MQTT", "mqtt")
+        self.broker = QLineEdit("127.0.0.1:1883")
+        self.broker.setMaximumWidth(160)
+        self.topic_edit = QLineEdit("gw/can")
+        self.topic_edit.setMaximumWidth(120)
+
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("数据源"))
+        src_row.addWidget(self.source)
+        src_row.addWidget(QLabel("broker"))
+        src_row.addWidget(self.broker)
+        src_row.addWidget(QLabel("主题"))
+        src_row.addWidget(self.topic_edit)
+        src_row.addStretch(1)
 
         # 过滤与暂停：0x181 每 20ms 一帧，不筛会把 0x180 淹掉
         self.id_filter = QLineEdit()
@@ -684,6 +704,7 @@ class MonitorPage(Page):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addLayout(src_row)
         layout.addLayout(buttons)
         layout.addWidget(body)
 
@@ -755,7 +776,12 @@ class MonitorPage(Page):
     def toggle_capture(self):
         if self.toggle.text() == "停止":
             self._stop = True
+            self.stop_source()
             self.toggle.setText("开始")
+            return
+
+        if self.source.currentData() == "mqtt":
+            self.start_mqtt()
             return
 
         client = self.app.client
@@ -821,16 +847,55 @@ class MonitorPage(Page):
         self.count_label.setText("")
         self.pause_hint.setText("已暂停" if self.pause.isChecked() else "")
 
-    def bump_count(self, frame_id):
+    def bump_count(self, frame_id, n=1):
         # 按 ID 计数在过滤之前：它反映的是总线上的真实分布，
-        # 被过滤掉的报文同样占带宽，不能不计
-        self.counts[frame_id] = self.counts.get(frame_id, 0) + 1
+        # 被过滤掉的报文同样占带宽，不能不计。
+        # MQTT 上行的 n 是窗口内聚合帧数，按 n 累加才等价于「总线上出现过多少帧」
+        self.counts[frame_id] = self.counts.get(frame_id, 0) + n
         parts = [f"0x{key:03X}×{value}" for key, value in sorted(self.counts.items())]
         self.count_label.setText("  ".join(parts[-4:]))
 
+    def start_mqtt(self):
+        from canstudio.uplink import UplinkSource, parse_broker
+
+        host, port = parse_broker(self.broker.text())
+        topic = self.topic_edit.text().strip() or "gw/can"
+
+        def on_frame(frame):
+            # paho 的回调在网络线程里，统一经信号回界面线程
+            self.frame_seen.emit((time.time(), frame.frame_id, frame.data,
+                                  False, frame.count))
+
+        def on_state(text):
+            self.app.post(lambda: self.app.log(text))
+
+        source = UplinkSource(host, port, topic, on_frame=on_frame, on_state=on_state)
+        try:
+            source.start()
+        except Exception as exc:
+            self.app.log(f"上行连接失败：{exc}")
+            return
+
+        self._uplink = source
+        self._stop = False
+        self.toggle.setText("停止")
+        self.app.log(f"订阅上行 {host}:{port} {topic}")
+
+    def stop_source(self):
+        if self._uplink is not None:
+            self._uplink.stop()
+            self.app.log(f"上行已断开（收到 {self._uplink.received} 条，"
+                         f"丢弃 {self._uplink.dropped} 条）")
+            self._uplink = None
+
     def append_row(self, item):
-        timestamp, frame_id, data, extended = item
-        self.bump_count(frame_id)
+        if len(item) >= 5:
+            timestamp, frame_id, data, extended, count = item[:5]
+        else:
+            timestamp, frame_id, data, extended = item
+            count = 1
+
+        self.bump_count(frame_id, count)
 
         if self.filter_ids and frame_id not in self.filter_ids:
             self.filtered_out += 1
@@ -852,6 +917,8 @@ class MonitorPage(Page):
         self.table.setItem(row, 0, QTableWidgetItem(format_timestamp(timestamp)))
         id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
         self.table.setItem(row, 1, QTableWidgetItem(id_text))
+        if count > 1:
+            name = f"{name} ×{count}" if name else f"×{count}"
         self.table.setItem(row, 2, QTableWidgetItem(name))
         self.table.setItem(row, 3, QTableWidgetItem(" ".join(f"{b:02X}" for b in data)))
         self.table.setItem(row, 4, QTableWidgetItem(decode.summary() if decode else ""))
