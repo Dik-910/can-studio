@@ -4,6 +4,7 @@
 QT_QPA_PLATFORM=offscreen 下 widget.grab() 不依赖 X11，所以没有显示器的
 机器也能出图，方便把界面状态留在仓库里。
 """
+import math
 import os
 import sys
 import time
@@ -111,8 +112,30 @@ def main():
         monitor.toggle_capture()
         pump(app, 0.5)
         monitor.toggle_capture()
-        # 展示过滤控件：只看两条报文
-        monitor.id_filter.setText("0x180 0x181 0x200")
+
+        # 加两条曲线并灌一段数据，让截图里能看到趋势
+        def pick(frame_id, name):
+            for index in range(monitor.signal_combo.count()):
+                if monitor.signal_combo.itemData(index) == (frame_id, name):
+                    monitor.signal_combo.setCurrentIndex(index)
+                    monitor.chart_button.click()
+                    return
+
+        # 只放一条曲线：Y 轴会自动贴合它的量程，趋势才看得出来。
+        # 两条量纲不同的信号共用一根 Y 轴会互相压扁（已知限制，见 README）。
+        pick(0x200, "PackVoltage")
+
+        base = time.time() - 6.0
+        for i in range(60):
+            stamp = base + i * 0.1
+            millivolt = 5112 + int(200 * math.sin(i / 9.0))
+            temp_c = 25 + int(4 * math.sin(i / 5.0))
+            # DBC 里这些信号是 @1+（Intel 小端），字节要低字节在前
+            payload = (millivolt.to_bytes(2, "little")
+                       + (-100 & 0xFFFF).to_bytes(2, "little")
+                       + bytes([87, temp_c + 40, 0, 0]))
+            monitor.append_row((stamp, 0x200, payload, False))
+        monitor.id_filter.setText("0x200")
 
     window.log("已连接 vcan0 0x7E0 → 0x7E8")
     window.log("0xF190 VIN = LSVAA1234567890AB")
@@ -133,7 +156,17 @@ def main():
     pump(app, 0.3)
     ok = render(app, window, out.replace(".png", "-dids.png")) and ok
 
-    return 0 if ok else 1
+    for page in window.pages:
+        chart = getattr(page, "chart", None)
+        if chart is not None:
+            chart._timer.stop()
+    window.runner.wait_all(2000)
+
+    # 直接让解释器正常退出时，PySide6 6.12 在收尾阶段偶发
+    # "Fatal Python error: none_dealloc"（图已写完，但退出码 134，
+    # make 会当失败）。这里显式结束进程：图已落盘，不需要 Qt 的优雅析构。
+    sys.stdout.flush()
+    os._exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

@@ -485,3 +485,89 @@ class MonitorDisplayTest(unittest.TestCase):
         self.page.clear_rows()
         self.assertEqual(self.page.counts, {})
         self.assertEqual(self.page.count_label.text(), "")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class MonitorChartTest(unittest.TestCase):
+    """表格看「有没有动」，曲线看「往哪动」。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+
+        from gui.main_window import MainWindow
+
+        handle = tempfile.NamedTemporaryFile("w", suffix=".dbc", delete=False,
+                                             encoding="utf-8")
+        handle.write(DBC_TEXT)
+        handle.close()
+        self.dbc = handle.name
+
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["报文监视"]
+        self.page.dbc_path.setText(self.dbc)
+        self.page.load_dbc()
+
+    def tearDown(self):
+        self.page._stop = True
+        self.page.chart._timer.stop()
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+        os.unlink(self.dbc)
+
+    def select(self, frame_id, signal_name):
+        for index in range(self.page.signal_combo.count()):
+            if self.page.signal_combo.itemData(index) == (frame_id, signal_name):
+                self.page.signal_combo.setCurrentIndex(index)
+                return
+        self.fail(f"下拉框里没有 0x{frame_id:03X}.{signal_name}")
+
+    def test_combo_is_filled_from_dbc(self):
+        items = [self.page.signal_combo.itemData(i)
+                 for i in range(self.page.signal_combo.count())]
+        self.assertIn((0x180, "NodeState"), items)
+        self.assertIn((0x200, "PackVoltage"), items)
+
+    def test_toggle_adds_and_removes_series(self):
+        self.select(0x180, "NodeState")
+        self.page.chart_button.click()
+        self.assertEqual(self.page.chart.series_keys(), ["180.NodeState"])
+
+        self.page.chart_button.click()
+        self.assertEqual(self.page.chart.series_keys(), [])
+
+    def test_frames_feed_the_chart(self):
+        self.select(0x200, "PackVoltage")
+        self.page.chart_button.click()
+
+        for i in range(5):
+            self.page.append_row((1000.0 + i * 0.1, 0x200,
+                                  bytes([0xF8 + i, 0x13, 0, 0, 87, 0, 0, 0]), False))
+
+        series = self.page.chart.series("200.PackVoltage")
+        self.assertEqual(len(series.points), 5)
+        self.assertAlmostEqual(series.latest(), 51.12 + i * 0.01, places=2)
+
+    def test_unselected_signals_do_not_accumulate(self):
+        self.select(0x200, "Soc")
+        self.page.chart_button.click()
+
+        self.page.append_row((1000.0, 0x180, bytes([1, 0, 0, 0, 0, 0, 0, 0]), False))
+        self.page.append_row((1000.0, 0x200, bytes([0xF8, 0x13, 0, 0, 87, 0, 0, 0]), False))
+
+        self.assertEqual(len(self.page.chart.series("200.Soc").points), 1)
+
+    def test_chart_paints_without_error(self):
+        self.select(0x180, "NodeState")
+        self.page.chart_button.click()
+        for i in range(10):
+            self.page.append_row((1000.0 + i * 0.1, 0x180,
+                                  bytes([1, 0, 0, 0, 0, 0, 0, 0]), False))
+
+        self.assertFalse(self.page.chart.grab().toImage().isNull())

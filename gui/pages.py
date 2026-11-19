@@ -8,6 +8,7 @@ import time
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QCheckBox,
     QFileDialog,
     QGridLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QSpinBox,
     QDoubleSpinBox,
     QTableWidget,
@@ -31,6 +33,8 @@ from canstudio import dtc as dtc_mod
 from canstudio.flash import Cancelled, FlashJob, load_firmware
 from canstudio.link import FrameMonitor
 from canstudio.signals import SignalDatabase, format_timestamp, parse_id_filter
+
+from .trend import TrendChart
 
 
 def describe_link(link):
@@ -651,10 +655,37 @@ class MonitorPage(Page):
         buttons.addStretch(1)
         buttons.addWidget(self.count_label)
 
+        # 曲线：表格看「有没有动」，曲线看「往哪动」
+        self.chart = TrendChart(window_s=10.0)
+        self.signal_combo = QComboBox()
+        self.signal_combo.setMinimumWidth(220)
+        self.signal_combo.setToolTip("从 DBC 里选一个信号加进曲线")
+        self.chart_button = QPushButton("加入/移除曲线")
+        self.chart_button.clicked.connect(self.toggle_chart_series)
+        clear_chart = QPushButton("清空曲线")
+        clear_chart.clicked.connect(self.chart.clear)
+
+        chart_row = QHBoxLayout()
+        chart_row.addWidget(QLabel("曲线"))
+        chart_row.addWidget(self.signal_combo)
+        chart_row.addWidget(self.chart_button)
+        chart_row.addWidget(clear_chart)
+        chart_row.addStretch(1)
+
+        body = QSplitter(Qt.Vertical)
+        body.addWidget(self.table)
+        chart_box = QWidget()
+        chart_layout = QVBoxLayout(chart_box)
+        chart_layout.setContentsMargins(0, 4, 0, 0)
+        chart_layout.addLayout(chart_row)
+        chart_layout.addWidget(self.chart)
+        body.addWidget(chart_box)
+        body.setSizes([380, 220])
+
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(buttons)
-        layout.addWidget(self.table)
+        layout.addWidget(body)
 
         if self.dbc_path.text():
             self.load_dbc(quiet=True)
@@ -679,10 +710,42 @@ class MonitorPage(Page):
             self.app.log(f"DBC 载入失败：{exc}")
             return
 
+        self.refill_signal_combo()
         names = ", ".join(msg.name for msg in self.db.messages[:4])
         if not quiet:
             self.app.log(f"DBC 已载入：{len(self.db)} 条报文（{names}…）")
         self.app.status.showMessage(f"DBC: {os.path.basename(path)}", 4000)
+
+    def refill_signal_combo(self):
+        self.signal_combo.clear()
+        if self.db is None:
+            return
+
+        for msg in self.db.messages:
+            for signal in msg.signals:
+                self.signal_combo.addItem(
+                    f"0x{msg.frame_id:03X} {msg.name}.{signal.name}",
+                    (msg.frame_id, signal.name))
+
+    @staticmethod
+    def series_key(frame_id, signal_name):
+        return f"{frame_id:03X}.{signal_name}"
+
+    def toggle_chart_series(self):
+        data = self.signal_combo.currentData()
+        if not data or self.db is None:
+            return
+
+        frame_id, signal_name = data
+        key = self.series_key(frame_id, signal_name)
+        label = self.signal_combo.currentText().split(" ", 1)[-1]
+
+        if self.chart.series(key) is not None:
+            self.chart.remove_series(key)
+            self.app.log(f"曲线移除 {label}")
+        else:
+            self.chart.add_series(key, label)
+            self.app.log(f"曲线加入 {label}")
 
     # ---------------- 采集 ----------------
 
@@ -792,6 +855,12 @@ class MonitorPage(Page):
         self.table.setItem(row, 2, QTableWidgetItem(name))
         self.table.setItem(row, 3, QTableWidgetItem(" ".join(f"{b:02X}" for b in data)))
         self.table.setItem(row, 4, QTableWidgetItem(decode.summary() if decode else ""))
+
+        if decode is not None and not decode.error:
+            for name, value, _unit in decode.signals:
+                key = self.series_key(frame_id, name)
+                if self.chart.series(key) is not None:
+                    self.chart.feed(key, timestamp, value)
 
         if row > 200:
             self.table.removeRow(0)
