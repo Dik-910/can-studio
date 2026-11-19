@@ -614,3 +614,17 @@ class MonitorUplinkTest(unittest.TestCase):
     def test_stop_source_is_safe_when_not_connected(self):
         self.page.stop_source()          # 不该抛异常
         self.assertIsNone(self.page._uplink)
+
+    def test_aggregated_message_feeds_chart(self):
+        # 曲线不区分数据源：MQTT 的聚合消息同样应当进曲线
+        self.page.id_filter.setText("")
+        self.page.add_series_for(0x200, "PackVoltage")
+
+        self.page.append_row((1000.0, 0x200,
+                              bytes([0xF8, 0x13, 0x9C, 0xFF, 87, 65, 0, 0]),
+                              False, 25))
+
+        series = self.page.chart.series("200.PackVoltage")
+        self.assertIsNotNone(series)
+        self.assertEqual(len(series.points), 1)
+        self.assertAlmostEqual(series.latest(), 51.12, places=2)

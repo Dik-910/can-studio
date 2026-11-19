@@ -752,6 +752,13 @@ class MonitorPage(Page):
     def series_key(frame_id, signal_name):
         return f"{frame_id:03X}.{signal_name}"
 
+    def add_series_for(self, frame_id, signal_name):
+        """直接按 ID 与信号名加曲线，测试与脚本用。"""
+        key = self.series_key(frame_id, signal_name)
+        if self.chart.series(key) is None:
+            self.chart.add_series(key, f"0x{frame_id:03X}.{signal_name}")
+        return key
+
     def toggle_chart_series(self):
         data = self.signal_combo.currentData()
         if not data or self.db is None:
