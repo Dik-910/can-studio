@@ -15,7 +15,13 @@ from canstudio.link import ensure_dependencies
 # cantools 装在本机的 .pylibs 下
 ensure_dependencies()
 
-from canstudio.signals import FrameDecode, SignalDatabase, fmt, parse_id_filter
+from canstudio.signals import (
+    FrameDecode,
+    SignalDatabase,
+    fmt,
+    format_timestamp,
+    parse_id_filter,
+)
 
 DEMO_DBC = """
 VERSION ""
@@ -151,6 +157,23 @@ class Formatting(unittest.TestCase):
     def test_decode_object_with_error(self):
         frame = FrameDecode(0x100, "Broken", error="长度不对")
         self.assertIn("长度不对", frame.summary())
+
+
+class Timestamp(unittest.TestCase):
+    """毫秒是必须的：20 ms 与 100 ms 两种周期只到秒就分不出来。"""
+
+    def test_has_millisecond_field(self):
+        import time as _t
+        text = format_timestamp(_t.mktime((2026, 11, 19, 10, 0, 0, 0, 0, -1)) + 0.123)
+        self.assertRegex(text, r"^10:00:00\.1\d\d$")
+
+    def test_rounds_up_into_next_second(self):
+        import time as _t
+        base = _t.mktime((2026, 11, 19, 10, 0, 0, 0, 0, -1))
+        self.assertTrue(format_timestamp(base + 0.9998).startswith("10:00:01"))
+
+    def test_none_is_placeholder(self):
+        self.assertEqual(format_timestamp(None), "--:--:--.---")
 
 
 class IdFilter(unittest.TestCase):

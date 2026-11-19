@@ -446,3 +446,42 @@ class MonitorFilterTest(unittest.TestCase):
         self.push(0x180)
         self.page.clear_rows()
         self.assertEqual(self.page.held, 0)
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class MonitorDisplayTest(unittest.TestCase):
+    def setUp(self):
+        from gui.main_window import MainWindow
+
+        self.app = QApplication.instance() or QApplication([])
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["报文监视"]
+
+    def tearDown(self):
+        self.page._stop = True
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+
+    def test_timestamp_shows_milliseconds(self):
+        self.page.append_row((1000.25, 0x180, b"\x01", False))
+        self.assertRegex(self.page.table.item(0, 0).text(), r"\.\d{3}$")
+
+    def test_counts_ignore_filter(self):
+        # 计数反映总线真实分布，被过滤掉的帧也要算进去
+        self.page.id_filter.setText("0x180")
+        for _ in range(3):
+            self.page.append_row((1000.0, 0x181, b"\x01", False))
+        self.page.append_row((1000.0, 0x180, b"\x01", False))
+
+        self.assertEqual(self.page.table.rowCount(), 1)
+        self.assertEqual(self.page.counts, {0x181: 3, 0x180: 1})
+        self.assertIn("0x181×3", self.page.count_label.text())
+
+    def test_clear_resets_counts(self):
+        self.page.append_row((1000.0, 0x181, b"\x01", False))
+        self.page.clear_rows()
+        self.assertEqual(self.page.counts, {})
+        self.assertEqual(self.page.count_label.text(), "")

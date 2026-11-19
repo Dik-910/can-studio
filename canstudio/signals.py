@@ -7,6 +7,7 @@ DBC 的解析交给 cantools —— 格式里有多路复用、值表、浮点�
 自己实现只会引入新的 bug。这里做的是把它包成「解不出来也不炸」的接口：
 总线上永远会有 DBC 里没有的 ID，工具不能因为不认识就中断监视。
 """
+import time
 
 
 class FrameDecode:
@@ -31,6 +32,22 @@ class FrameDecode:
 
     def __repr__(self):
         return f"FrameDecode(0x{self.frame_id:03X}, {self.name}, {len(self.signals)} signals)"
+
+
+def format_timestamp(timestamp):
+    """带毫秒的时刻。
+
+    只到秒的话，20 ms 与 100 ms 两种周期在表里看起来一样 —— 一眼看不出
+    哪条报文快、哪条慢，也就没法判断总线是否正常。
+    """
+    if timestamp is None:
+        return "--:--:--.---"
+    whole = int(timestamp)
+    millis = int(round((timestamp - whole) * 1000))
+    if millis >= 1000:          # 浮点四舍五入可能进位到下一秒
+        whole += 1
+        millis = 0
+    return time.strftime("%H:%M:%S", time.localtime(whole)) + f".{millis:03d}"
 
 
 def parse_id_filter(text):

@@ -26,7 +26,7 @@ from canstudio.flash import FlashJob, load_firmware
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
 from canstudio.link import FrameMonitor, RecordingLink, SocketCanLink
-from canstudio.signals import SignalDatabase, parse_id_filter
+from canstudio.signals import SignalDatabase, format_timestamp, parse_id_filter
 from canstudio.uds import SESSION_EXTENDED, UdsClient
 
 
@@ -341,7 +341,7 @@ def cmd_monitor(args):
             if only and frame_id not in only:
                 continue
             seen += 1
-            moment = time.strftime("%H:%M:%S", time.localtime(timestamp))
+            moment = format_timestamp(timestamp)
             id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
             raw = " ".join(f"{b:02X}" for b in data)
 

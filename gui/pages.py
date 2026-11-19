@@ -30,7 +30,7 @@ from canstudio import dids
 from canstudio import dtc as dtc_mod
 from canstudio.flash import Cancelled, FlashJob, load_firmware
 from canstudio.link import FrameMonitor
-from canstudio.signals import SignalDatabase, parse_id_filter
+from canstudio.signals import SignalDatabase, format_timestamp, parse_id_filter
 
 
 def describe_link(link):
@@ -599,6 +599,7 @@ class MonitorPage(Page):
         self.filter_ids = set()
         self.filtered_out = 0
         self.held = 0
+        self.counts = {}
         self.frame_seen.connect(self.append_row)
 
         self.table = make_table(["时刻", "ID", "报文", "字节", "解析"])
@@ -636,6 +637,8 @@ class MonitorPage(Page):
         self.pause.toggled.connect(self.toggle_pause)
 
         self.pause_hint = QLabel("")
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("color: gray")
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.toggle)
@@ -646,6 +649,7 @@ class MonitorPage(Page):
         buttons.addWidget(self.pause)
         buttons.addWidget(self.pause_hint)
         buttons.addStretch(1)
+        buttons.addWidget(self.count_label)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -750,10 +754,20 @@ class MonitorPage(Page):
     def reset_counters(self):
         self.filtered_out = 0
         self.held = 0
+        self.counts.clear()
+        self.count_label.setText("")
         self.pause_hint.setText("已暂停" if self.pause.isChecked() else "")
+
+    def bump_count(self, frame_id):
+        # 按 ID 计数在过滤之前：它反映的是总线上的真实分布，
+        # 被过滤掉的报文同样占带宽，不能不计
+        self.counts[frame_id] = self.counts.get(frame_id, 0) + 1
+        parts = [f"0x{key:03X}×{value}" for key, value in sorted(self.counts.items())]
+        self.count_label.setText("  ".join(parts[-4:]))
 
     def append_row(self, item):
         timestamp, frame_id, data, extended = item
+        self.bump_count(frame_id)
 
         if self.filter_ids and frame_id not in self.filter_ids:
             self.filtered_out += 1
@@ -772,7 +786,7 @@ class MonitorPage(Page):
 
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(timestamp))))
+        self.table.setItem(row, 0, QTableWidgetItem(format_timestamp(timestamp)))
         id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
         self.table.setItem(row, 1, QTableWidgetItem(id_text))
         self.table.setItem(row, 2, QTableWidgetItem(name))
