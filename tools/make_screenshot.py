@@ -7,6 +7,7 @@ QT_QPA_PLATFORM=offscreen 下 widget.grab() 不依赖 X11，所以没有显示�
 import math
 import os
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,6 +126,14 @@ def main():
         # 两条量纲不同的信号共用一根 Y 轴会互相压扁（已知限制，见 README）。
         pick(0x200, "PackVoltage")
 
+        # 同时落一份库，供历史页截图
+        from canstudio.history import HistoryStore
+        from canstudio.uplink import UplinkFrame
+        db_path = os.path.join(tempfile.gettempdir(), "canstudio-shot.db")
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        store = HistoryStore(db_path)
+
         base = time.time() - 6.0
         for i in range(60):
             stamp = base + i * 0.1
@@ -135,7 +144,9 @@ def main():
                        + (-100 & 0xFFFF).to_bytes(2, "little")
                        + bytes([87, temp_c + 40, 0, 0]))
             monitor.append_row((stamp, 0x200, payload, False))
+            store.add(UplinkFrame("vcan1", 0x200, payload, count=1), ts=stamp)
         monitor.id_filter.setText("0x200")
+        store.close()
 
     window.log("已连接 vcan0 0x7E0 → 0x7E8")
     window.log("0xF190 VIN = LSVAA1234567890AB")
@@ -155,6 +166,17 @@ def main():
     window.nav.setCurrentRow(1)
     pump(app, 0.3)
     ok = render(app, window, out.replace(".png", "-dids.png")) and ok
+
+    # 第三张：历史页，读刚才落的库
+    history = pages["历史"]
+    history.db_path.setText(db_path)
+    history.reload()
+    if history.table.rowCount():
+        history.table.selectRow(0)
+        history.plot_selected()
+    window.nav.setCurrentRow(5)
+    pump(app, 0.4)
+    ok = render(app, window, out.replace(".png", "-history.png")) and ok
 
     for page in window.pages:
         chart = getattr(page, "chart", None)

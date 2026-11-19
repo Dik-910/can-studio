@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
 
 from canstudio.dids import DEFAULT_TABLE
 
-from .pages import (ConnectionPage, DidPage, DtcPage, FlashPage, MonitorPage,
-                    describe_link)
+from .pages import (ConnectionPage, DidPage, DtcPage, FlashPage, HistoryPage,
+                    MonitorPage, describe_link)
 from .worker import TaskRunner
 
 
@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
             DtcPage(self),
             FlashPage(self),
             MonitorPage(self),
+            HistoryPage(self),
         ]
 
         self.nav = QListWidget()

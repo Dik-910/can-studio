@@ -23,6 +23,7 @@ from canstudio import dtc as dtc_mod
 from canstudio import dids
 from canstudio.dids import DEFAULT_TABLE, DidTable
 from canstudio.flash import FlashJob, load_firmware
+from canstudio.history import HistoryStore, Recorder
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
 from canstudio.link import FrameMonitor, RecordingLink, SocketCanLink
@@ -302,6 +303,119 @@ def cmd_raw(args):
     return 0
 
 
+def cmd_record(args):
+    """把网关上行落库。
+
+    网关报的是「变化量」，不落库就只剩最近一次变化；落库之后才有历史与
+    趋势，也才能算「某个 ID 过去一小时平均多少帧」。
+    """
+    store = HistoryStore(args.db)
+    recorder = Recorder(store, batch=args.batch, flush_s=args.flush)
+
+    host, port = parse_broker(args.broker)
+    topic = args.topic or "gw/can"
+
+    def on_frame(frame):
+        recorder.on_frame(frame)
+
+    source = UplinkSource(host, port, topic, on_frame=on_frame,
+                          on_state=lambda text: print(text))
+    try:
+        source.start()
+    except Exception as exc:
+        print(f"上行连接失败：{exc}", file=sys.stderr)
+        store.close()
+        return 1
+
+    print(f"落库 {args.db}，订阅 {host}:{port} {topic}（Ctrl-C 结束）")
+    started = time.time()
+    last_report = started
+
+    try:
+        while True:
+            time.sleep(0.2)
+            recorder.tick()
+
+            now = time.time()
+            if now - last_report >= 10:
+                span = now - started
+                print(f"[{time.strftime('%H:%M:%S')}] {recorder.stored} 条 / "
+                      f"{span:.0f} s，入库 {store.count()} 条", flush=True)
+                last_report = now
+
+            if args.hours:
+                # 顺带裁剪：长时间采集必须有上限，否则库会无限长
+                store.prune(now - args.hours * 3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        recorder.flush()
+        source.stop()
+        span = store.span()
+        store.close()
+
+    print(f"已落库 {span['messages']} 条消息")
+    return 0
+
+
+def cmd_history(args):
+    """查历史：不带 --id 出按 ID 的汇总，带 --id 出时间序列。"""
+    store = HistoryStore(args.db)
+    since = time.time() - args.hours * 3600 if args.hours else None
+
+    db = None
+    if args.dbc:
+        try:
+            db = SignalDatabase.load(args.dbc)
+        except Exception as exc:
+            print(f"DBC 载入失败：{exc}", file=sys.stderr)
+            store.close()
+            return 1
+
+    if args.id:
+        can_id = int(args.id, 16)
+        rows = store.series(can_id, since=since, limit=args.limit)
+        if not rows:
+            print("没有数据")
+            store.close()
+            return 0
+
+        print(f"0x{can_id:03X} 共 {len(rows)} 条：")
+        for ts, data in rows:
+            moment = format_timestamp(ts)
+            if db is None:
+                print(f"  {moment}  {data.hex(' ').upper()}")
+            else:
+                decoded = db.decode(can_id, data)
+                print(f"  {moment}  {decoded.summary() if decoded else data.hex(' ').upper()}")
+        store.close()
+        return 0
+
+    rows = store.summary(since=since)
+    if not rows:
+        print("没有数据")
+        store.close()
+        return 0
+
+    span = store.span()
+    window = f"最近 {args.hours} 小时" if args.hours else "全部"
+    print(f"{args.db}（{window}）：{span['messages']} 条消息，"
+          f"{store.total_frames(since=since)} 帧")
+    print()
+    print(f"{'ID':<8} {'报文':<14} {'消息':>6} {'帧数':>8}  最后值")
+    for row in rows:
+        name, value = "", ""
+        if db is not None:
+            decoded = db.decode(row["can_id"], row["last_data"])
+            if decoded is not None:
+                name, value = decoded.name, decoded.summary()
+        print(f"0x{row['can_id']:03X}  {name:<14} {row['messages']:>6} "
+              f"{row['frames']:>8}  {value}")
+
+    store.close()
+    return 0
+
+
 def cmd_monitor_mqtt(args):
     """读网关的 MQTT 上行。
 
@@ -497,6 +611,23 @@ def build_parser():
     p.add_argument("--reset", action="store_true", help="刷完复位")
     p.add_argument("-y", "--yes", action="store_true", help="跳过确认")
     p.set_defaults(func=cmd_flash)
+
+    p = sub.add_parser("record", parents=[common], help="把网关 MQTT 上行落库")
+    p.add_argument("--db", default="gateway.db", help="SQLite 文件")
+    p.add_argument("--broker", default="127.0.0.1:1883")
+    p.add_argument("--topic", default="gw/can")
+    p.add_argument("--batch", type=int, default=50, help="攒多少条提交一次")
+    p.add_argument("--flush", type=float, default=2.0, help="最多攒几秒")
+    p.add_argument("--hours", type=float, default=0, help="只保留最近这么多小时")
+    p.set_defaults(func=cmd_record)
+
+    p = sub.add_parser("history", parents=[common], help="查落库的历史数据")
+    p.add_argument("--db", default="gateway.db")
+    p.add_argument("--hours", type=float, default=0, help="只看最近这么多小时")
+    p.add_argument("--id", default="", help="看某个 ID 的时间序列，如 0x200")
+    p.add_argument("--dbc", help="DBC 文件，给了就按信号显示")
+    p.add_argument("--limit", type=int, default=200, help="序列最多打印多少条")
+    p.set_defaults(func=cmd_history)
 
     p = sub.add_parser("raw", parents=[common], help="发一帧原始 UDS 请求")
     p.add_argument("bytes", nargs="+")

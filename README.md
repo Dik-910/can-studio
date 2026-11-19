@@ -12,6 +12,7 @@ canstudio/dtc.py     语义：故障码、状态位、快照的解读
 canstudio/flash.py   流程：0x34/36/37 编排、重试、进度、CRC 交叉校验
 canstudio/signals.py 语义：按 DBC 把 CAN 帧解成信号值
 canstudio/uplink.py  数据源：订阅网关的 MQTT 上行，还原成帧
+canstudio/history.py 存储：上行报文落 SQLite，供历史与统计查询
 gui/                 界面：五页 Qt 窗口，只调用上面四层，不含协议编码
 ```
 
@@ -30,16 +31,19 @@ gui/                 界面：五页 Qt 窗口，只调用上面四层，不含�
 | `canstudio/flash.py` | 已实现：HEX/S-record 解析、分块、序号回绕、重试、CRC 交叉校验 |
 | `canstudio/signals.py` | 已实现：DBC 载入与帧解码，未知报文不中断监视 |
 | `canstudio/uplink.py` | 已实现：MQTT 上行订阅与解析（聚合报文还原成帧） |
+| `canstudio/history.py` | 已实现：SQLite 落库、批量提交、按 ID 汇总与序列查询 |
 | `cli.py` | 已实现：会话、DID 读写、故障码、刷写、原始请求、监视 |
 | `gui/` | 已实现：连接、DID、故障码、刷写、报文监视五页（PySide6） |
 
-测试 184 项，全部不依赖 CAN 接口与显示器。
+测试 205 项，全部不依赖 CAN 接口与显示器。
 
 ## 界面
 
 ![报文监视](docs/screenshot.png)
 
 ![数据标识](docs/screenshot-dids.png)
+
+![历史](docs/screenshot-history.png)
 
 左栏五个功能页，底部是操作日志，状态栏显示当前连接。所有耗时操作都走后台
 线程，界面不会因为一次 P2 超时而假死。
@@ -128,6 +132,33 @@ tester 侧收帧: {0x7e0: 309, 0x7e8: 28}
 
 9 块 × 每块一个多帧传输（`0x36` 带 254 字节 → 1 个首帧 + 36 个连续帧），
 两个方向合计 337 帧在 60 ms 内穿完网关，顺序与流控都没乱。
+
+## 落库与历史
+
+网关上报的是**变化量**：数值不变就不报。所以实时页面看到的是「最近一次变化」，
+看不到「过去一小时电压怎么走的」。落库之后才有历史、统计和趋势。
+
+```bash
+./cli.py record --db gateway.db --hours 24      # 订阅上行并落库，只留最近 24 小时
+./cli.py history --db gateway.db --hours 1      # 按 ID 汇总
+./cli.py history --db gateway.db --id 0x200 --dbc ../can-node/docs/can_matrix.dbc
+```
+
+界面里「历史」页读同一个库：按时间窗筛选、选中一行就把它的历史画成曲线。
+
+实测（节点 vcan1 + 网关 + 落库 8 秒）：
+
+```
+gateway.db（全部）：9 条消息，361 帧
+
+ID       报文                 消息       帧数  最后值
+0x180  NodeStatus          6       60  NodeState=1 ErrLevel=0 BusOffCnt=0 UptimeS=8 s
+0x181  BusStatus           3      301  Tec=0 Rec=0 BusLoadPermille=0 permille
+```
+
+**「消息数」和「帧数」是两个概念**，必须分开存：网关把 500 ms 窗口内的帧聚合成
+一条消息，0x181 一条消息可能代表 101 帧。只存消息数会把总线的实际负载算少两个
+数量级，所以表里 `n` 单独一列，`SUM(n)` 才是「总线上出现过多少帧」。
 
 ## DID 表
 

@@ -92,8 +92,8 @@ class MainWindowTest(unittest.TestCase):
 
     def test_all_pages_present(self):
         self.assertEqual([p.title for p in self.window.pages],
-                         ["连接", "数据标识", "故障码", "刷写", "报文监视"])
-        self.assertEqual(self.window.nav.count(), 5)
+                         ["连接", "数据标识", "故障码", "刷写", "报文监视", "历史"])
+        self.assertEqual(self.window.nav.count(), 6)
 
     def test_requires_connection_first(self):
         self.window.set_client(None)
@@ -628,3 +628,74 @@ class MonitorUplinkTest(unittest.TestCase):
         self.assertIsNotNone(series)
         self.assertEqual(len(series.points), 1)
         self.assertAlmostEqual(series.latest(), 51.12, places=2)
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class HistoryPageTest(unittest.TestCase):
+    """历史页读的是 record 落下的库，与实时页共用同一个文件。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        import time as _t
+
+        from canstudio.history import HistoryStore
+        from canstudio.uplink import UplinkFrame
+        from gui.main_window import MainWindow
+
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.db_path = handle.name
+
+        store = HistoryStore(self.db_path)
+        base = _t.time() - 60
+        for i in range(20):
+            store.add(UplinkFrame("vcan1", 0x200,
+                                  (5112 + i * 10).to_bytes(2, "little")
+                                  + b"\x9C\xFF\x57\x41\x00\x00", count=5),
+                      ts=base + i * 2)
+        store.add(UplinkFrame("vcan1", 0x180, bytes([1, 0, 0, 0, 7, 0, 0, 0]), count=10),
+                  ts=base + 5)
+        store.close()
+
+        self.window = MainWindow()
+        self.page = {p.title: p for p in self.window.pages}["历史"]
+        self.page.db_path.setText(self.db_path)
+
+    def tearDown(self):
+        self.page.chart._timer.stop()
+        self.window.runner.wait_all(2000)
+        self.window.close()
+        os.unlink(self.db_path)
+
+    def test_reload_lists_ids(self):
+        self.page.reload()
+
+        self.assertEqual(self.page.table.rowCount(), 2)
+        self.assertEqual(self.page.table.item(0, 0).text(), "0x180")
+        self.assertIn("PackData", self.page.table.item(1, 1).text())
+        # 帧数按 n 累加：0x200 二十条 ×5
+        self.assertEqual(self.page.table.item(1, 3).text(), "100")
+
+    def test_summary_counts(self):
+        self.page.reload()
+        self.assertIn("2 个 ID", self.page.summary_label.text())
+
+    def test_selecting_row_plots_series(self):
+        self.page.reload()
+        self.page.table.selectRow(1)          # 0x200
+        self.page.plot_selected()
+
+        series = self.page.chart.series("200.PackVoltage")
+        self.assertIsNotNone(series)
+        self.assertEqual(len(series.points), 20)
+        self.assertAlmostEqual(series.latest(), 53.02, places=2)
+
+    def test_missing_db_is_reported(self):
+        self.page.db_path.setText("/nonexistent/gw.db")
+        self.page.reload()
+        self.assertIn("不存在", self.page.summary_label.text())

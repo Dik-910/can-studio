@@ -32,6 +32,7 @@ from canstudio import dids
 from canstudio import dtc as dtc_mod
 from canstudio.flash import Cancelled, FlashJob, load_firmware
 from canstudio.link import FrameMonitor
+from canstudio.history import HistoryStore
 from canstudio.signals import SignalDatabase, format_timestamp, parse_id_filter
 
 from .trend import TrendChart
@@ -939,3 +940,172 @@ class MonitorPage(Page):
         if row > 200:
             self.table.removeRow(0)
         self.table.scrollToBottom()
+
+
+class HistoryPage(Page):
+    """网关数据的历史视图。
+
+    实时页面看到的是「最近一次变化」，这里看到的是「过去一段时间怎么走的」。
+    数据来自 record 落下的 SQLite —— 两边共用同一个库文件。
+    """
+
+    title = "历史"
+
+    DEFAULT_DBC = MonitorPage.DEFAULT_DBC
+
+    def __init__(self, app):
+        super().__init__(app)
+
+        self.db_path = QLineEdit("gateway.db")
+        open_button = QPushButton("打开")
+        open_button.clicked.connect(self.reload)
+        browse = QPushButton("…")
+        browse.setMaximumWidth(30)
+        browse.clicked.connect(self.browse)
+
+        self.window_box = QComboBox()
+        self.window_box.addItem("最近 1 小时", 1.0)
+        self.window_box.addItem("最近 24 小时", 24.0)
+        self.window_box.addItem("全部", 0.0)
+        self.window_box.setCurrentIndex(2)
+        self.window_box.currentIndexChanged.connect(self.reload)
+
+        self.apply_filter = QPushButton("应用")
+        self.apply_filter.clicked.connect(self.reload)
+
+        self.summary_label = QLabel("尚未打开数据库")
+        self.summary_label.setStyleSheet("color: gray")
+
+        self.table = make_table(["ID", "报文", "消息", "帧数", "最后时刻", "最后值"])
+
+        self.chart = TrendChart(window_s=3600.0, refresh_ms=200)
+        self.dbc_path = QLineEdit()
+        if os.path.exists(self.DEFAULT_DBC):
+            self.dbc_path.setText(os.path.normpath(self.DEFAULT_DBC))
+            self.dbc = None
+            try:
+                self.dbc = SignalDatabase.load(self.dbc_path.text())
+            except Exception:
+                self.dbc = None
+        else:
+            self.dbc = None
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("数据库"))
+        top.addWidget(self.db_path)
+        top.addWidget(browse)
+        top.addWidget(open_button)
+        top.addWidget(self.window_box)
+        top.addWidget(self.apply_filter)
+        top.addStretch(1)
+
+        body = QSplitter(Qt.Vertical)
+        body.addWidget(self.table)
+        chart_box = QWidget()
+        chart_layout = QVBoxLayout(chart_box)
+        chart_layout.setContentsMargins(0, 4, 0, 0)
+        chart_layout.addWidget(QLabel("选中一行，画它的第一个数值信号"))
+        chart_layout.addWidget(self.chart)
+        body.addWidget(chart_box)
+        body.setSizes([300, 240])
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(self.summary_label)
+        layout.addWidget(body)
+
+        self.table.itemSelectionChanged.connect(self.plot_selected)
+        self._rows = []
+
+    # ---------------- 数据 ----------------
+
+    def browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据库", "", "SQLite (*.db *.sqlite);;所有文件 (*)")
+        if path:
+            self.db_path.setText(path)
+            self.reload()
+
+    def reload(self):
+        path = self.db_path.text().strip()
+        if not path or not os.path.exists(path):
+            self.summary_label.setText(f"数据库不存在：{path}")
+            return
+
+        hours = self.window_box.currentData()
+        since = time.time() - hours * 3600 if hours else None
+
+        try:
+            with HistoryStore(path, wal=False) as store:
+                rows = store.summary(since=since)
+                messages = store.count(since=since)
+                frames = store.total_frames(since=since)
+        except Exception as exc:
+            self.summary_label.setText(f"打开失败：{exc}")
+            return
+
+        self._rows = rows
+        self.table.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            name, value = "", ""
+            if self.dbc is not None:
+                decoded = self.dbc.decode(row["can_id"], row["last_data"])
+                if decoded is not None:
+                    name, value = decoded.name, decoded.summary()
+
+            cells = [f"0x{row['can_id']:03X}", name, str(row["messages"]),
+                     str(row["frames"]), format_timestamp(row["last_ts"]), value]
+            for column, text in enumerate(cells):
+                self.table.setItem(index, column, QTableWidgetItem(text))
+
+        span = f"{messages} 条消息 / {frames} 帧"
+        self.summary_label.setText(f"{path}：{span}，{len(rows)} 个 ID")
+
+    def plot_selected(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows or self.dbc is None:
+            return
+
+        row = self._rows[rows[0]]
+        message = self.dbc.message(row["can_id"])
+        if message is None:
+            return
+
+        self.chart.clear_series()
+        self.chart.window_s = 3600.0
+
+        # 只画第一个数值信号：历史页不提供逐信号选择，避免控件堆成一片
+        target = None
+        for signal in message.signals:
+            target = signal.name
+            break
+        if target is None:
+            return
+
+        key = f"{row['can_id']:03X}.{target}"
+        self.chart.add_series(key, f"{message.name}.{target}")
+
+        try:
+            with HistoryStore(self.db_path.text().strip(), wal=False) as store:
+                series = store.series(row["can_id"])
+        except Exception as exc:
+            self.app.log(f"读取历史失败：{exc}")
+            return
+
+        if series and len(series) > 1:
+            span = series[-1][0] - series[0][0]
+            self.chart.window_s = max(1.0, span * 1.05)
+
+        for ts, data in series:
+            decoded = self.dbc.decode(row["can_id"], data)
+            if decoded is None:
+                continue
+            for name, value, _unit in decoded.signals:
+                if name == target:
+                    self.chart.feed(key, ts, value)
+                    break
+
+        self.app.log(f"历史 {message.name}.{target}：{len(series)} 个点")
+
+    def on_enter(self):
+        if self.table.rowCount() == 0:
+            self.reload()
