@@ -111,6 +111,8 @@ def main():
         monitor.toggle_capture()
         pump(app, 0.5)
         monitor.toggle_capture()
+        # 展示过滤控件：只看两条报文
+        monitor.id_filter.setText("0x180 0x181 0x200")
 
     window.log("已连接 vcan0 0x7E0 → 0x7E8")
     window.log("0xF190 VIN = LSVAA1234567890AB")

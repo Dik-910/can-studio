@@ -30,7 +30,7 @@ from canstudio import dids
 from canstudio import dtc as dtc_mod
 from canstudio.flash import Cancelled, FlashJob, load_firmware
 from canstudio.link import FrameMonitor
-from canstudio.signals import SignalDatabase
+from canstudio.signals import SignalDatabase, parse_id_filter
 
 
 def describe_link(link):
@@ -596,6 +596,9 @@ class MonitorPage(Page):
         self._monitor_factory = monitor_factory or self._open_monitor
         self._stop = False
         self.db = None
+        self.filter_ids = set()
+        self.filtered_out = 0
+        self.held = 0
         self.frame_seen.connect(self.append_row)
 
         self.table = make_table(["时刻", "ID", "报文", "字节", "解析"])
@@ -612,7 +615,7 @@ class MonitorPage(Page):
         self.toggle = QPushButton("开始")
         self.toggle.clicked.connect(self.toggle_capture)
         clear = QPushButton("清空")
-        clear.clicked.connect(lambda: self.table.setRowCount(0))
+        clear.clicked.connect(self.clear_rows)
         self.keepalive = QCheckBox("保持会话（0x3E）")
         self.keepalive.setChecked(True)
 
@@ -622,10 +625,26 @@ class MonitorPage(Page):
         top.addWidget(browse)
         top.addWidget(load_dbc)
 
+        # 过滤与暂停：0x181 每 20ms 一帧，不筛会把 0x180 淹掉
+        self.id_filter = QLineEdit()
+        self.id_filter.setPlaceholderText("只看这些 ID，如 0x180 0x181；留空显示全部")
+        self.id_filter.textChanged.connect(self.update_filter)
+
+        self.pause = QPushButton("暂停")
+        self.pause.setCheckable(True)
+        self.pause.setToolTip("暂停后不再插入新行，采集继续")
+        self.pause.toggled.connect(self.toggle_pause)
+
+        self.pause_hint = QLabel("")
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.toggle)
         buttons.addWidget(clear)
         buttons.addWidget(self.keepalive)
+        buttons.addWidget(QLabel("  过滤"))
+        buttons.addWidget(self.id_filter)
+        buttons.addWidget(self.pause)
+        buttons.addWidget(self.pause_hint)
         buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -710,8 +729,41 @@ class MonitorPage(Page):
 
         self.app.run(work, lambda _: None, lambda m: self.app.log(f"监视中止：{m}"))
 
+    def clear_rows(self):
+        self.table.setRowCount(0)
+        self.reset_counters()
+
+    def update_filter(self, text):
+        self.filter_ids = parse_id_filter(text)
+
+    def toggle_pause(self, paused):
+        if paused:
+            self.held = 0
+            self.pause_hint.setText("已暂停")
+            self.pause.setToolTip("")
+        else:
+            if self.held:
+                self.app.log(f"恢复显示，暂停期间到达 {self.held} 帧（未保留）")
+            self.held = 0
+            self.pause_hint.setText("")
+
+    def reset_counters(self):
+        self.filtered_out = 0
+        self.held = 0
+        self.pause_hint.setText("已暂停" if self.pause.isChecked() else "")
+
     def append_row(self, item):
         timestamp, frame_id, data, extended = item
+
+        if self.filter_ids and frame_id not in self.filter_ids:
+            self.filtered_out += 1
+            return
+
+        if self.pause.isChecked():
+            self.held += 1
+            self.pause_hint.setText(f"已暂停（已到达 {self.held} 帧）")
+            return
+
         decode = self.db.decode(frame_id, data) if self.db is not None else None
 
         name = decode.name if decode is not None and decode.name else ""

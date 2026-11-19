@@ -33,6 +33,29 @@ class FrameDecode:
         return f"FrameDecode(0x{self.frame_id:03X}, {self.name}, {len(self.signals)} signals)"
 
 
+def parse_id_filter(text):
+    """把 "0x180, 181 0x200" 这类输入解析成 ID 集合。
+
+    空串表示不过滤，返回空集合。无法识别的项直接跳过 —— 用户边打字边过滤，
+    中途的 "0x1" 这种半截输入不该弹错误框。
+    """
+    if not text:
+        return set()
+
+    ids = set()
+    for token in str(text).replace(",", " ").replace(";", " ").split():
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token, 16)
+        except ValueError:
+            continue
+        if 0 <= value <= 0x1FFFFFFF:
+            ids.add(value)
+    return ids
+
+
 def fmt(value, unit=""):
     """数值格式化：整数不带小数点，小数留两位。"""
     if isinstance(value, float):

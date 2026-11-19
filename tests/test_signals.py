@@ -15,7 +15,7 @@ from canstudio.link import ensure_dependencies
 # cantools 装在本机的 .pylibs 下
 ensure_dependencies()
 
-from canstudio.signals import FrameDecode, SignalDatabase, fmt
+from canstudio.signals import FrameDecode, SignalDatabase, fmt, parse_id_filter
 
 DEMO_DBC = """
 VERSION ""
@@ -151,6 +151,30 @@ class Formatting(unittest.TestCase):
     def test_decode_object_with_error(self):
         frame = FrameDecode(0x100, "Broken", error="长度不对")
         self.assertIn("长度不对", frame.summary())
+
+
+class IdFilter(unittest.TestCase):
+    def test_empty_means_no_filter(self):
+        self.assertEqual(parse_id_filter(""), set())
+        self.assertEqual(parse_id_filter(None), set())
+        self.assertEqual(parse_id_filter("   "), set())
+
+    def test_accepts_0x_and_bare_hex(self):
+        self.assertEqual(parse_id_filter("0x180"), {0x180})
+        self.assertEqual(parse_id_filter("180"), {0x180})
+
+    def test_separators(self):
+        self.assertEqual(parse_id_filter("0x180,181;0x200"), {0x180, 0x181, 0x200})
+        self.assertEqual(parse_id_filter("0x180  0x181"), {0x180, 0x181})
+
+    def test_partial_input_does_not_raise(self):
+        # 用户边打字边过滤，"0x1" 这种半截输入也应当能用
+        self.assertEqual(parse_id_filter("0x1"), {0x1})
+        self.assertEqual(parse_id_filter("zzz"), set())
+        self.assertEqual(parse_id_filter("0x180,,,"), {0x180})
+
+    def test_rejects_out_of_range(self):
+        self.assertEqual(parse_id_filter("0xFFFFFFFF"), set())
 
 
 if __name__ == "__main__":

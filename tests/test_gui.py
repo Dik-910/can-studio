@@ -364,3 +364,85 @@ class DidTablePageTest(unittest.TestCase):
 
         self.window.set_client(None)
         self.assertFalse(self.page.timer.isActive(), "断开后必须停掉定时器")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not installed")
+@unittest.skipUnless(HAVE_CANTOOLS, "cantools not installed")
+class MonitorFilterTest(unittest.TestCase):
+    """过滤与暂停：0x181 每 20ms 一帧，不筛会把 0x180 淹掉。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from gui.main_window import MainWindow
+
+        self.window = MainWindow()
+        self.window.set_client(UdsClient(ScriptedEcu(ecu_handler)))
+        self.page = {p.title: p for p in self.window.pages}["报文监视"]
+
+    def tearDown(self):
+        self.page._stop = True
+        self.window.runner.wait_all(2000)
+        self.window.set_client(None)
+        self.window.close()
+
+    def push(self, frame_id, payload=b"\x01"):
+        self.page.append_row((1000.0, frame_id, payload, False))
+
+    def test_filter_keeps_only_listed_ids(self):
+        self.page.id_filter.setText("0x180")
+        self.push(0x180)
+        self.push(0x181)
+        self.push(0x200)
+        self.push(0x180)
+
+        self.assertEqual(self.page.table.rowCount(), 2)
+        self.assertEqual(self.page.table.item(0, 1).text(), "0x180")
+        self.assertEqual(self.page.filtered_out, 2)
+
+    def test_multiple_ids(self):
+        self.page.id_filter.setText("0x180, 0x181")
+        for frame_id in (0x180, 0x181, 0x200):
+            self.push(frame_id)
+
+        self.assertEqual(self.page.table.rowCount(), 2)
+
+    def test_clearing_filter_shows_everything_again(self):
+        self.page.id_filter.setText("0x180")
+        self.push(0x181)
+        self.assertEqual(self.page.table.rowCount(), 0)
+
+        self.page.id_filter.setText("")
+        self.push(0x181)
+        self.assertEqual(self.page.table.rowCount(), 1)
+
+    def test_pause_holds_rows_but_counts_frames(self):
+        self.page.pause.setChecked(True)
+        self.push(0x180)
+        self.push(0x180)
+
+        self.assertEqual(self.page.table.rowCount(), 0, "暂停期间不该插行")
+        self.assertEqual(self.page.held, 2)
+        self.assertIn("2 帧", self.page.pause_hint.text())
+
+        self.page.pause.setChecked(False)
+        self.push(0x180)
+        self.assertEqual(self.page.table.rowCount(), 1, "恢复后应当继续插行")
+        self.assertIn("2 帧", self.window.log_view.toPlainText())
+
+    def test_pause_takes_precedence_over_filter(self):
+        self.page.id_filter.setText("0x180")
+        self.page.pause.setChecked(True)
+        self.push(0x181)      # 被过滤掉，不该计入暂停计数
+        self.push(0x180)      # 命中过滤但被暂停
+
+        self.assertEqual(self.page.filtered_out, 1)
+        self.assertEqual(self.page.held, 1)
+
+    def test_clear_resets_counters(self):
+        self.page.pause.setChecked(True)
+        self.push(0x180)
+        self.page.clear_rows()
+        self.assertEqual(self.page.held, 0)

@@ -26,7 +26,7 @@ from canstudio.flash import FlashJob, load_firmware
 from canstudio.dids import describe, find
 from canstudio.errors import CanStudioError, NegativeResponse, TransportTimeout
 from canstudio.link import FrameMonitor, RecordingLink, SocketCanLink
-from canstudio.signals import SignalDatabase
+from canstudio.signals import SignalDatabase, parse_id_filter
 from canstudio.uds import SESSION_EXTENDED, UdsClient
 
 
@@ -318,7 +318,10 @@ def cmd_monitor(args):
             return 1
         print(f"DBC {args.dbc}：{len(db)} 条报文")
 
+    only = parse_id_filter(args.ids)
     monitor = FrameMonitor(args.iface)
+    if only:
+        print(f"只看 {', '.join(f'0x{v:03X}' for v in sorted(only))}")
     print(f"监视 {args.iface}（Ctrl-C 退出）")
     last_ping = time.monotonic()
     seen = 0
@@ -335,6 +338,8 @@ def cmd_monitor(args):
                 continue
 
             timestamp, frame_id, data, extended = item
+            if only and frame_id not in only:
+                continue
             seen += 1
             moment = time.strftime("%H:%M:%S", time.localtime(timestamp))
             id_text = f"0x{frame_id:08X}" if extended else f"0x{frame_id:03X}"
@@ -436,6 +441,7 @@ def build_parser():
     p = sub.add_parser("monitor", parents=[common], help="原始帧监视，可按 DBC 解析")
     p.add_argument("--dbc", help="DBC 文件，给了就按信号显示")
     p.add_argument("--count", type=int, default=0, help="收到这么多帧后退出，0 表示一直跑")
+    p.add_argument("--id", dest="ids", default="", help="只看这些 ID，如 0x180,0x181")
     p.set_defaults(func=cmd_monitor)
 
     return parser

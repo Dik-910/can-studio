@@ -48,8 +48,12 @@ SocketCAN 套接字，所以能看到总线上真实流动的周期帧（ISO-TP 
 `PackVoltage=51.12 V  PackCurrent=-1 A  Soc=87 %`，而不是十六进制字节。
 
 ```bash
-./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc
+./cli.py monitor --dbc ../can-node/docs/can_matrix.dbc --id 0x180
 ```
+
+帧率高的时候需要筛：0x181 每 20 ms 一帧，0x180 每 100 ms，不筛会被淹掉。
+过滤框接受 `0x180 0x181`、`180,181` 这类写法，留空显示全部。
+「暂停」只停止插入新行，采集继续；恢复时会告诉你在暂停期间到达了多少帧。
 
 DID 页支持周期读取：勾上「周期读取」并设定间隔，表格按拍刷新；两次之间
 值发生变化时会在日志里点出来。命令行等价物是 `did watch`：
